@@ -14,8 +14,9 @@ from src.backtest import (
     backtest_regimes,
     run_strategy,
 )
+from src.data import segment_ids
 from src.metrics import calmar
-from src.regimes import NAMES, RuleRegimes, hold_labels
+from src.regimes import NAMES, RuleRegimes, hold_labels, regime_features
 from src.signals import SignalParams, strategy_signal
 
 BARS_PER_DAY = 288
@@ -342,3 +343,60 @@ def freeze_theta(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Evaluación final con θ congelado
+# ---------------------------------------------------------------------------
+def _flat_result(index: pd.Index) -> BacktestResult:
+    """Resultado de una estrategia que no opera: el capital queda inmóvil."""
+    return BacktestResult(pd.Series(INITIAL_CASH, index=index, name="equity"), pd.DataFrame(), 0.0, 0.0)
+
+
+def buy_and_hold(test: pd.DataFrame, seg: pd.Series) -> BacktestResult:
+    """Comprar al inicio y mantener, sin costos. Los retornos se encadenan dentro de cada tramo
+    continuo, así que el salto entre tramos no cuenta como ganancia ni como pérdida."""
+    parts, level = [], INITIAL_CASH
+    for _, d in test.groupby(seg, sort=False):
+        parts.append(level * d["Close"] / d["Open"].iloc[0])
+        level = parts[-1].iloc[-1]
+    return BacktestResult(pd.concat(parts).rename("equity"), pd.DataFrame(), 0.0, 0.0)
+
+
+def evaluate_frozen(train: pd.DataFrame, test: pd.DataFrame, theta: dict) -> dict:
+    """Evalúa en test, una sola vez, los parámetros congelados (diccionario de freeze_theta).
+
+    Los indicadores y las variables de régimen se calculan sobre train + test, así que el
+    arranque del test usa el pasado de train (es causal) y no se abre ninguna posición antes
+    del primer dato de test. Los umbrales de régimen son los congelados, nunca se reajustan.
+    Una estrategia sin parámetros (el gate no se cumplió en train) no opera.
+
+    Devuelve {'theta_unico', 'theta_por_regimen', 'comprar_y_mantener'} con el equity de test."""
+    full = pd.concat([train, test])
+    seg = segment_ids(full)
+    n_train = len(train)
+    fold = Fold(0, n_train, len(full))
+    test_index = full.index[n_train:]
+
+    single_p = theta["single"]["params"]
+    if single_p is None:
+        single = _flat_result(test_index)
+    else:
+        res, start = run_oos(full, fold, single_p)
+        single = BacktestResult(res.equity.iloc[start:], res.trades, res.total_costs, res.traded_notional)
+
+    by_code = {code: theta["regimes"][name]["params"] for code, name in NAMES.items()}
+    thetas = {code: p for code, p in by_code.items() if p is not None}
+    if not thetas:
+        regimes = _flat_result(test_index)
+    else:
+        rules = RuleRegimes(theta["rules"]["vol_crisis"], theta["rules"]["r2_trend"])
+        labels = hold_labels(rules.classify(regime_features(full, seg)), seg)
+        res, start = run_regime_oos(full, seg, labels, fold, thetas)
+        regimes = BacktestResult(res.equity.iloc[start:], res.trades, res.total_costs, res.traded_notional)
+
+    return {
+        "theta_unico": single,
+        "theta_por_regimen": regimes,
+        "comprar_y_mantener": buy_and_hold(test, seg.iloc[n_train:]),
+    }
