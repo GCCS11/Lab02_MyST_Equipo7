@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from src.data import segment_ids
+from dataclasses import dataclass
 
 MIN_AGREE = 2  # regla de confirmación fijada por el lab: 2 de 3
 
@@ -107,3 +108,27 @@ def confirm_signal(signals: pd.DataFrame, min_agree: int = MIN_AGREE) -> pd.Seri
         np.select([longs >= min_agree, shorts >= min_agree], [1, -1], default=0),
         index=signals.index,
     )
+
+
+@dataclass(frozen=True)
+class SignalParams:
+    """Ventanas de los tres indicadores elegidos (valores por defecto, sin optimizar)."""
+
+    n_donchian: int = 48
+    n_roc: int = 12
+    n_ema: int = 20
+    n_atr: int = 14
+    k: float = 2.0
+
+
+def strategy_signal(df: pd.DataFrame, seg: pd.Series, p: SignalParams):
+    """Pipeline de señal: tres indicadores -> regla 2 de 3. Devuelve (señal, ATR)."""
+    three = pd.DataFrame(
+        {
+            "donchian": donchian_signal(df, seg, p.n_donchian),
+            "roc": roc_signal(df, seg, p.n_roc),
+            "keltner": keltner_signal(df, seg, p.n_ema, p.n_atr, p.k),
+        }
+    )
+    return confirm_signal(three), atr(df, seg, p.n_atr)
+

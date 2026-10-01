@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 import numpy as np
+from src.data import segment_ids
+from src.signals import SignalParams, strategy_signal
 
 FEE = 0.00125  # comisión por operación (entrada y salida), fijada por el lab
 
@@ -207,4 +209,10 @@ def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
         traded_notional=pf.traded_notional,
     )
 
+
+def run_strategy(df, signal_params: SignalParams, params: BacktestParams) -> BacktestResult:
+    """Pipeline completo: tramos -> indicadores -> señal 2 de 3 -> backtest."""
+    seg = segment_ids(df)
+    signal, atr_series = strategy_signal(df, seg, signal_params)
+    return backtest(df, signal, atr_series, seg, params)
 
