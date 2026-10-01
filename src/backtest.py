@@ -1,7 +1,9 @@
+"""Motor de backtest: posición, sizing, regla de salida, estado del portafolio y backtest()."""
 from dataclasses import dataclass
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 from src.data import segment_ids
 from src.signals import SignalParams, strategy_signal
 
@@ -127,6 +129,7 @@ class Portfolio:
         pos_value = self.position.side * self.position.qty * mark_price if self.position else 0.0
         return self.cash + pos_value
 
+
 @dataclass(frozen=True)
 class BacktestParams:
     """Parámetros del motor (no de los indicadores)."""
@@ -149,7 +152,7 @@ class BacktestResult:
     traded_notional: float
 
 
-def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
+def backtest(df, signal, atr, seg, params: BacktestParams, start: int = 0) -> BacktestResult:
     """Backtest event-driven, sin estado global: mismos argumentos, mismo resultado.
 
     La señal de la barra t-1 (calculada al cierre) se ejecuta en la apertura de t.
@@ -158,7 +161,8 @@ def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
       2. Entrada a la apertura si no hay posición y la señal es distinta de 0.
       3. Stop-loss / take-profit intrabarra (el stop gana si ambos caen en la barra).
       4. Cierre forzado al cierre de la última barra de cada tramo continuo.
-    Ninguna entrada usa la señal de un tramo anterior."""
+    Ninguna entrada usa la señal de un tramo anterior. No se abre ninguna posición
+    antes de la barra `start` (sirve para dejar un periodo de calentamiento)."""
     o, h, l, c = (df[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
     sig = signal.to_numpy()
     atr_v = atr.to_numpy(dtype=float)
@@ -181,7 +185,7 @@ def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
             elif i - entry_i >= params.max_hold:
                 pf.close(o[i], times[i], "max_hold")
 
-        if pf.position is None and prev_sig != 0 and np.isfinite(prev_atr) and prev_atr > 0:
+        if i >= start and pf.position is None and prev_sig != 0 and np.isfinite(prev_atr) and prev_atr > 0:
             stop_dist = params.m * prev_atr
             if params.r * stop_dist / o[i] >= params.min_tp_pct:
                 qty = size_position(pf.cash, o[i], stop_dist, params.risk_frac, params.fee)
@@ -211,9 +215,12 @@ def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
     )
 
 
-def run_strategy(df, signal_params: SignalParams, params: BacktestParams) -> BacktestResult:
+def run_strategy(
+    df, signal_params: SignalParams, params: BacktestParams, start: int = 0
+) -> BacktestResult:
     """Pipeline completo: tramos -> indicadores -> señal 2 de 3 -> backtest."""
     seg = segment_ids(df)
     signal, atr_series = strategy_signal(df, seg, signal_params)
-    return backtest(df, signal, atr_series, seg, params)
+    return backtest(df, signal, atr_series, seg, params, start)
+
 

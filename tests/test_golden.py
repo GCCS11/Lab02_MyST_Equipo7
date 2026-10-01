@@ -1,3 +1,4 @@
+"""Golden-file test: camino de 6 barras con el equity final calculado a mano."""
 import pandas as pd
 import pytest
 
@@ -46,3 +47,35 @@ def test_backtest_matches_hand_calculation():
     assert res.equity.tolist() == pytest.approx(expected_equity, rel=1e-12)
     assert res.trades["reason"].tolist() == ["take_profit", "stop_loss"]
     assert res.total_costs == pytest.approx(2_612.0765625)
+
+
+def test_start_blocks_entries_before_that_bar():
+    """Con start=3 no se abre el largo de la barra 1; solo el corto de la barra 3."""
+    idx = pd.date_range("2024-01-01", periods=6, freq="5min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "Open": [100, 100, 101, 104, 104.5, 106.5],
+            "High": [101, 102, 105, 105, 107, 107],
+            "Low": [99, 99, 100, 103, 104, 106],
+            "Close": [100, 101, 104, 104.5, 106.5, 106.5],
+        },
+        index=idx,
+        dtype=float,
+    )
+    signal = pd.Series([1, 0, -1, 0, 0, 0], index=idx)
+    atr = pd.Series(1.0, index=idx)
+    seg = pd.Series(0, index=idx)
+
+    res = backtest(df, signal, atr, seg, BacktestParams(m=2, r=2), start=3)
+
+    # Corto en la barra 3 a 104: qty = 0.01*1,000,000/2 = 5,000, nocional 520,000, comisión 650.
+    #   efectivo = 1,000,000 + 520,000 - 650 = 1,519,350.
+    #   Cierre barra 3 (104.5): 1,519,350 - 5,000*104.5 = 996,850.
+    # Barra 4: el máximo (107) supera el stop 106. Recompra 530,000, comisión 662.5:
+    #   efectivo = 1,519,350 - 530,000 - 662.5 = 988,687.5.
+    expected = [1_000_000.0, 1_000_000.0, 1_000_000.0, 996_850.0, 988_687.5, 988_687.5]
+    assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
+    assert res.trades["reason"].tolist() == ["stop_loss"]
+
+
+    
