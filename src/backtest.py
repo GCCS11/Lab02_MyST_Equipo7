@@ -8,6 +8,7 @@ from src.data import segment_ids
 from src.signals import SignalParams, strategy_signal
 
 FEE = 0.00125  # comisión por operación (entrada y salida), fijada por el lab
+INITIAL_CASH = 1_000_000.0  # capital inicial, fijado por el lab
 
 
 @dataclass(frozen=True)
@@ -20,9 +21,10 @@ class Position:
     stop_loss: float
     take_profit: float
     entry_time: pd.Timestamp
+    regime: int = 0  # régimen vigente cuando se abrió la posición
 
     @classmethod
-    def from_atr(cls, side, qty, entry_price, atr, m, r, entry_time):
+    def from_atr(cls, side, qty, entry_price, atr, m, r, entry_time, regime=0):
         """SL = entrada -/+ m*ATR y TP = entrada +/- r*m*ATR (según el lado)."""
         stop_dist = m * atr
         return cls(
@@ -32,6 +34,7 @@ class Position:
             entry_price - side * stop_dist,
             entry_price + side * r * stop_dist,
             entry_time,
+            regime,
         )
 
 
@@ -117,6 +120,7 @@ class Portfolio:
                 "entry_price": pos.entry_price,
                 "exit_price": price,
                 "reason": reason,
+                "regime": pos.regime,
                 "pnl": pos.side * pos.qty * (price - pos.entry_price)
                 - self._entry_cost
                 - exit_cost,
@@ -140,7 +144,7 @@ class BacktestParams:
     max_hold: int = 288  # holding máximo en barras (288 = 24 h de barras de 5 min)
     signal_exit_after: int = 0  # la señal opuesta solo cierra tras esta cantidad de barras
     min_tp_pct: float = 0.005  # filtro de viabilidad: distancia al target >= 0.5% del precio
-    cash: float = 1_000_000.0
+    cash: float = INITIAL_CASH
     fee: float = FEE
 
 
@@ -152,49 +156,77 @@ class BacktestResult:
     traded_notional: float
 
 
-def backtest(df, signal, atr, seg, params: BacktestParams, start: int = 0) -> BacktestResult:
-    """Backtest event-driven, sin estado global: mismos argumentos, mismo resultado.
+@dataclass(frozen=True)
+class RegimeSpec:
+    """Señal, ATR y parámetros del motor que se usan mientras el régimen vigente sea éste."""
 
-    La señal de la barra t-1 (calculada al cierre) se ejecuta en la apertura de t.
-    Orden de eventos dentro de cada barra t:
-      1. Salida a la apertura por señal opuesta o por holding máximo.
-      2. Entrada a la apertura si no hay posición y la señal es distinta de 0.
+    signal: pd.Series
+    atr: pd.Series
+    params: BacktestParams
+
+
+def backtest_regimes(
+    df,
+    seg,
+    labels,
+    specs: dict,
+    start: int = 0,
+    close_on_change: bool = True,
+) -> BacktestResult:
+    """Backtest event-driven, sin estado global, con parámetros distintos por régimen.
+
+    `labels` es la etiqueta de régimen al cierre de cada barra y `specs` asigna a cada
+    régimen su RegimeSpec; un régimen sin spec es un régimen en el que no se opera.
+    La señal y la etiqueta de la barra t-1 (calculadas al cierre) se ejecutan en la
+    apertura de t. Orden de eventos dentro de cada barra t:
+      1. Salida a la apertura: si cambió el régimen (con close_on_change), por señal
+         opuesta o por holding máximo. La posición conserva los parámetros del régimen
+         en que se abrió.
+      2. Entrada a la apertura si no hay posición, el régimen vigente tiene spec y su
+         señal es distinta de 0, con los parámetros de ese régimen.
       3. Stop-loss / take-profit intrabarra (el stop gana si ambos caen en la barra).
       4. Cierre forzado al cierre de la última barra de cada tramo continuo.
-    Ninguna entrada usa la señal de un tramo anterior. No se abre ninguna posición
-    antes de la barra `start` (sirve para dejar un periodo de calentamiento)."""
+    Ninguna entrada usa señal ni etiqueta de un tramo anterior. No se abre ninguna
+    posición antes de la barra `start` (sirve para dejar un periodo de calentamiento)."""
     o, h, l, c = (df[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
-    sig = signal.to_numpy()
-    atr_v = atr.to_numpy(dtype=float)
     seg_v = seg.to_numpy()
+    lab = labels.to_numpy()
+    sig_by = {r: sp.signal.to_numpy() for r, sp in specs.items()}
+    atr_by = {r: sp.atr.to_numpy(dtype=float) for r, sp in specs.items()}
     times = df.index
     n = len(df)
-    pf = Portfolio(params.cash, params.fee)
+    first = next(iter(specs.values())).params
+    pf = Portfolio(first.cash, first.fee)
     equity = np.empty(n)
-    entry_i = -1
+    entry_i, pos_regime = -1, None
 
     for i in range(n):
         same_segment = i > 0 and seg_v[i] == seg_v[i - 1]
-        prev_sig = sig[i - 1] if same_segment else 0
-        prev_atr = atr_v[i - 1] if same_segment else np.nan
+        reg = lab[i - 1] if same_segment else None
 
         pos = pf.position
         if pos is not None:
-            if prev_sig == -pos.side and i - entry_i >= params.signal_exit_after:
+            pp = specs[pos_regime].params
+            own_sig = sig_by[pos_regime][i - 1] if same_segment else 0
+            if close_on_change and reg != pos_regime:
+                pf.close(o[i], times[i], "regime_change")
+            elif own_sig == -pos.side and i - entry_i >= pp.signal_exit_after:
                 pf.close(o[i], times[i], "signal")
-            elif i - entry_i >= params.max_hold:
+            elif i - entry_i >= pp.max_hold:
                 pf.close(o[i], times[i], "max_hold")
 
-        if i >= start and pf.position is None and prev_sig != 0 and np.isfinite(prev_atr) and prev_atr > 0:
-            stop_dist = params.m * prev_atr
-            if params.r * stop_dist / o[i] >= params.min_tp_pct:
-                qty = size_position(pf.cash, o[i], stop_dist, params.risk_frac, params.fee)
-                pf.open(
-                    Position.from_atr(
-                        int(prev_sig), qty, o[i], prev_atr, params.m, params.r, times[i]
+        if i >= start and pf.position is None and reg in specs:
+            sp = specs[reg].params
+            prev_sig = sig_by[reg][i - 1]
+            prev_atr = atr_by[reg][i - 1]
+            if prev_sig != 0 and np.isfinite(prev_atr) and prev_atr > 0:
+                stop_dist = sp.m * prev_atr
+                if sp.r * stop_dist / o[i] >= sp.min_tp_pct:
+                    qty = size_position(pf.cash, o[i], stop_dist, sp.risk_frac, sp.fee)
+                    pf.open(
+                        Position.from_atr(int(prev_sig), qty, o[i], prev_atr, sp.m, sp.r, times[i], reg)
                     )
-                )
-                entry_i = i
+                    entry_i, pos_regime = i, reg
 
         pos = pf.position
         if pos is not None:
@@ -215,6 +247,12 @@ def backtest(df, signal, atr, seg, params: BacktestParams, start: int = 0) -> Ba
     )
 
 
+def backtest(df, signal, atr, seg, params: BacktestParams, start: int = 0) -> BacktestResult:
+    """Backtest con un único conjunto de parámetros (un solo régimen). Ver backtest_regimes."""
+    labels = pd.Series(0, index=df.index)
+    return backtest_regimes(df, seg, labels, {0: RegimeSpec(signal, atr, params)}, start)
+
+
 def run_strategy(
     df, signal_params: SignalParams, params: BacktestParams, start: int = 0
 ) -> BacktestResult:
@@ -222,5 +260,4 @@ def run_strategy(
     seg = segment_ids(df)
     signal, atr_series = strategy_signal(df, seg, signal_params)
     return backtest(df, signal, atr_series, seg, params, start)
-
 

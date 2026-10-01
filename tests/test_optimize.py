@@ -1,6 +1,22 @@
-"""Pruebas de la función objetivo de una ventana y del gate del walk-forward."""
+"""Pruebas de la función objetivo, del gate del walk-forward y del walk-forward por régimen."""
+import numpy as np
+import pandas as pd
+
+from src.backtest import backtest_regimes
 from src.data import segment_ids
-from src.optimize import NEVER, PENALTY, make_folds, walk_forward, window_objective
+from src.optimize import (
+    NEVER,
+    PENALTY,
+    make_folds,
+    regime_n_min,
+    regime_window_objective,
+    walk_forward,
+    walk_forward_regimes,
+    window_objective,
+)
+from src.regimes import regime_features
+from tests.test_golden import regime_path
+from tests.test_regimes import regime_prices
 from tests.test_signals import make_prices
 
 P = {
@@ -26,7 +42,7 @@ def test_objective_returns_calmar_when_enough_trades():
 def test_walk_forward_gate_keeps_cash_when_no_edge_in_sample():
     """Con un gate inalcanzable no se opera ninguna semana y el equity queda plano."""
     df = make_prices(3000)
-    table, oos, _ = walk_forward(df, small_folds(df), n_trials=3, gate=1e9)
+    table, oos, _ = walk_forward(df, small_folds(df), n_trials=3, gate=np.inf)
     assert not table["traded"].any()
     assert (table["oos_trades"] == 0).all()
     assert (oos.equity == 1_000_000.0).all()
@@ -38,5 +54,57 @@ def test_walk_forward_without_gate_trades_every_week():
     table, _, _ = walk_forward(df, small_folds(df), n_trials=3)
     assert table["traded"].all()
 
+
+def test_regime_objective_penalizes_a_regime_that_never_occurs():
+    df = make_prices()
+    labels = pd.Series(1, index=df.index)  # todas las barras son del régimen 1
+    assert regime_window_objective(df, segment_ids(df), labels, 2, P, n_min=1) < PENALTY / 2
+
+
+def test_regime_min_trades_scale_with_regime_share():
+    assert regime_n_min(5000, 10000, 10) == 5
+    assert regime_n_min(100, 10000, 10) == 3  # nunca menos de 3
+
+
+def test_trades_record_the_regime_they_were_opened_in():
+    df, seg, labels, specs = regime_path()
+    res = backtest_regimes(df, seg, labels, specs)
+    assert res.trades["regime"].tolist() == [1]
+
+
+def regime_ohlc():
+    """Precios sintéticos de tres regímenes con las cuatro columnas OHLC."""
+    close = regime_prices()["Close"]
+    open_ = close.shift(1).fillna(close.iloc[0])
+    return pd.DataFrame(
+        {
+            "Open": open_,
+            "High": np.maximum(open_, close) * 1.0004,
+            "Low": np.minimum(open_, close) * 0.9996,
+            "Close": close,
+        }
+    )
+
+
+def regime_setup():
+    df = regime_ohlc()
+    seg = segment_ids(df)
+    feats = regime_features(df, seg, 300)
+    return df, seg, feats, make_folds(seg, train_bars=3000, test_bars=700, step_bars=700)
+
+
+def test_walk_forward_regimes_keeps_cash_when_gate_is_unreachable():
+    df, seg, feats, folds = regime_setup()
+    table, oos, _ = walk_forward_regimes(df, feats, seg, folds, n_trials=3, gate=np.inf)
+    assert (table["regimes_traded"] == 0).all()
+    assert (oos.equity == 1_000_000.0).all()
+    assert {"bars_reversion", "bars_tendencia", "bars_crisis"} <= set(table.columns)
+
+
+def test_walk_forward_regimes_trades_and_labels_each_trade_with_a_regime():
+    df, seg, feats, folds = regime_setup()
+    table, oos, _ = walk_forward_regimes(df, feats, seg, folds, n_trials=5, gate=-1e9)
+    assert len(oos.trades) > 0, "la prueba sería vacía sin operaciones"
+    assert set(oos.trades["regime"]) <= {0, 1, 2}
 
     
