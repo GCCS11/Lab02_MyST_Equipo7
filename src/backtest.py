@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import pandas as pd
+import numpy as np
 
 FEE = 0.00125  # comisión por operación (entrada y salida), fijada por el lab
 
@@ -123,3 +124,87 @@ class Portfolio:
         """Valor del portafolio: efectivo más el valor de la posición abierta."""
         pos_value = self.position.side * self.position.qty * mark_price if self.position else 0.0
         return self.cash + pos_value
+
+@dataclass(frozen=True)
+class BacktestParams:
+    """Parámetros del motor (no de los indicadores)."""
+
+    m: float  # stop = m * ATR
+    r: float  # target = r * stop
+    risk_frac: float = 0.01  # presupuesto de riesgo por operación (fracción del equity)
+    max_hold: int = 288  # holding máximo en barras (288 = 24 h de barras de 5 min)
+    min_tp_pct: float = 0.005  # filtro de viabilidad: distancia al target >= 0.5% del precio
+    cash: float = 1_000_000.0
+    fee: float = FEE
+
+
+@dataclass
+class BacktestResult:
+    equity: pd.Series
+    trades: pd.DataFrame
+    total_costs: float
+    traded_notional: float
+
+
+def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
+    """Backtest event-driven, sin estado global: mismos argumentos, mismo resultado.
+
+    La señal de la barra t-1 (calculada al cierre) se ejecuta en la apertura de t.
+    Orden de eventos dentro de cada barra t:
+      1. Salida a la apertura por señal opuesta o por holding máximo.
+      2. Entrada a la apertura si no hay posición y la señal es distinta de 0.
+      3. Stop-loss / take-profit intrabarra (el stop gana si ambos caen en la barra).
+      4. Cierre forzado al cierre de la última barra de cada tramo continuo.
+    Ninguna entrada usa la señal de un tramo anterior."""
+    o, h, l, c = (df[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    sig = signal.to_numpy()
+    atr_v = atr.to_numpy(dtype=float)
+    seg_v = seg.to_numpy()
+    times = df.index
+    n = len(df)
+    pf = Portfolio(params.cash, params.fee)
+    equity = np.empty(n)
+    entry_i = -1
+
+    for i in range(n):
+        same_segment = i > 0 and seg_v[i] == seg_v[i - 1]
+        prev_sig = sig[i - 1] if same_segment else 0
+        prev_atr = atr_v[i - 1] if same_segment else np.nan
+
+        pos = pf.position
+        if pos is not None:
+            if prev_sig == -pos.side:
+                pf.close(o[i], times[i], "signal")
+            elif i - entry_i >= params.max_hold:
+                pf.close(o[i], times[i], "max_hold")
+
+        if pf.position is None and prev_sig != 0 and np.isfinite(prev_atr) and prev_atr > 0:
+            stop_dist = params.m * prev_atr
+            if params.r * stop_dist / o[i] >= params.min_tp_pct:
+                qty = size_position(pf.cash, o[i], stop_dist, params.risk_frac, params.fee)
+                pf.open(
+                    Position.from_atr(
+                        int(prev_sig), qty, o[i], prev_atr, params.m, params.r, times[i]
+                    )
+                )
+                entry_i = i
+
+        pos = pf.position
+        if pos is not None:
+            hit = check_exit(pos, o[i], h[i], l[i])
+            if hit is not None:
+                pf.close(hit[1], times[i], hit[0])
+
+        if pf.position is not None and (i == n - 1 or seg_v[i + 1] != seg_v[i]):
+            pf.close(c[i], times[i], "segment_end")
+
+        equity[i] = pf.equity(c[i])
+
+    return BacktestResult(
+        equity=pd.Series(equity, index=df.index, name="equity"),
+        trades=pd.DataFrame(pf.trades),
+        total_costs=pf.total_costs,
+        traded_notional=pf.traded_notional,
+    )
+
+
