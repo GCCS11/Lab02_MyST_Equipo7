@@ -1,4 +1,4 @@
-"""Optimización de hiperparámetros y walk-forward (con un solo θ o con un θ por régimen)."""
+""""Optimización de hiperparámetros y walk-forward (con un solo θ o con un θ por régimen)."""
 import time
 from dataclasses import dataclass
 
@@ -25,6 +25,7 @@ SEED = 42
 PENALTY = -1e6  # valor del objetivo para configuraciones inválidas
 NEVER = 10**9  # signal_exit_after = NEVER equivale a no salir por señal opuesta
 B_MIN_BARS = BARS_PER_DAY  # barras mínimas de un régimen en la ventana para optimizar su θ
+FINAL_N_MIN = 30  # mínimo de operaciones al ajustar θ una sola vez sobre todo el train
 
 
 @dataclass(frozen=True)
@@ -291,3 +292,53 @@ def walk_forward_regimes(
         return path, res.trades, res.total_costs, res.traded_notional, row
 
     return _chain_folds(df, folds, fold_fn, verbose)
+
+
+# ---------------------------------------------------------------------------
+# Congelar θ antes de la evaluación final
+# ---------------------------------------------------------------------------
+def freeze_theta(
+    df: pd.DataFrame,
+    feats: pd.DataFrame,
+    seg: pd.Series,
+    n_trials: int = N_TRIALS,
+    n_min: int = FINAL_N_MIN,
+    gate: float = 0.0,
+) -> dict:
+    """Optimiza una sola vez sobre todo el train el θ único, los umbrales de régimen y el θ de
+    cada régimen. Devuelve un diccionario serializable. Un θ cuyo mejor Calmar no supera
+    `gate` se guarda como None: esa estrategia no opera (el optimizador no encontró ventaja
+    ni dentro de muestra). Esto se hace y se guarda antes de abrir el archivo de test."""
+    single = optimize_window(df, n_trials, n_min)
+    rules = RuleRegimes.fit(feats)
+    labels = hold_labels(rules.classify(feats), seg)
+    regimes = {}
+    for code, name in NAMES.items():
+        bars = int((labels == code).sum())
+        entry = {"bars": bars, "calmar": None, "params": None}
+        if bars >= B_MIN_BARS:
+            study = optimize_regime_window(
+                df, seg, labels, code, n_trials, regime_n_min(bars, len(df), n_min)
+            )
+            entry["calmar"] = float(study.best_value)
+            entry["params"] = study.best_params if study.best_value > gate else None
+        regimes[name] = entry
+    return {
+        "meta": {
+            "n_trials": n_trials,
+            "n_min_trades": n_min,
+            "gate": gate,
+            "seed": SEED,
+            "train_start": str(df.index[0]),
+            "train_end": str(df.index[-1]),
+            "train_bars": len(df),
+        },
+        "single": {
+            "calmar": float(single.best_value),
+            "params": single.best_params if single.best_value > gate else None,
+        },
+        "rules": {"vol_crisis": rules.vol_crisis, "r2_trend": rules.r2_trend},
+        "regimes": regimes,
+    }
+
+
