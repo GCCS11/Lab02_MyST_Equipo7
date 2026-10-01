@@ -135,6 +135,7 @@ class BacktestParams:
     r: float  # target = r * stop
     risk_frac: float = 0.01  # presupuesto de riesgo por operación (fracción del equity)
     max_hold: int = 288  # holding máximo en barras (288 = 24 h de barras de 5 min)
+    signal_exit_after: int = 0  # la señal opuesta solo cierra tras esta cantidad de barras
     min_tp_pct: float = 0.005  # filtro de viabilidad: distancia al target >= 0.5% del precio
     cash: float = 1_000_000.0
     fee: float = FEE
@@ -175,7 +176,7 @@ def backtest(df, signal, atr, seg, params: BacktestParams) -> BacktestResult:
 
         pos = pf.position
         if pos is not None:
-            if prev_sig == -pos.side:
+            if prev_sig == -pos.side and i - entry_i >= params.signal_exit_after:
                 pf.close(o[i], times[i], "signal")
             elif i - entry_i >= params.max_hold:
                 pf.close(o[i], times[i], "max_hold")
