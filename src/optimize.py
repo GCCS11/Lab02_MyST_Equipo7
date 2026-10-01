@@ -1,6 +1,6 @@
 """"Optimización de hiperparámetros y walk-forward (con un solo θ o con un θ por régimen)."""
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import optuna
@@ -11,13 +11,22 @@ from src.backtest import (
     BacktestParams,
     BacktestResult,
     RegimeSpec,
+    backtest,
     backtest_regimes,
     run_strategy,
 )
 from src.data import segment_ids
-from src.metrics import calmar
+from src.metrics import calmar, summary
 from src.regimes import NAMES, RuleRegimes, hold_labels, regime_features
-from src.signals import SignalParams, strategy_signal
+from src.signals import (
+    SignalParams,
+    atr,
+    confirm_signal,
+    donchian_signal,
+    keltner_signal,
+    roc_signal,
+    strategy_signal,
+)
 
 BARS_PER_DAY = 288
 N_MIN_TRADES = 10  # mínimo de operaciones por ventana de entrenamiento
@@ -400,3 +409,70 @@ def evaluate_frozen(train: pd.DataFrame, test: pd.DataFrame, theta: dict) -> dic
         "theta_por_regimen": regimes,
         "comprar_y_mantener": buy_and_hold(test, seg.iloc[n_train:]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Análisis de robustez (sobre los parámetros congelados)
+# ---------------------------------------------------------------------------
+def confirmation_effect(df: pd.DataFrame, p: dict) -> pd.DataFrame:
+    """Pregunta 1: efecto de la regla 2 de 3 frente a cada indicador por separado, con los
+    mismos parámetros, el mismo stop, el mismo target y los mismos costos."""
+    sp, bp = to_params(p)
+    seg = segment_ids(df)
+    signals = {
+        "donchian": donchian_signal(df, seg, sp.n_donchian),
+        "roc": roc_signal(df, seg, sp.n_roc),
+        "keltner": keltner_signal(df, seg, sp.n_ema, sp.n_atr, sp.k),
+    }
+    signals["2 de 3"] = confirm_signal(pd.DataFrame(signals))
+    atr_series = atr(df, seg, sp.n_atr)
+    rows = {}
+    for name, signal in signals.items():
+        s = summary(backtest(df, signal, atr_series, seg, bp))
+        rows[name] = {k: s[k] for k in ("n_operaciones", "retorno_total", "calmar", "sharpe", "win_rate")}
+    return pd.DataFrame(rows).T
+
+
+def sensitivity(df: pd.DataFrame, p: dict, pct: float = 0.20) -> pd.DataFrame:
+    """Pregunta 3: varía cada parámetro numérico en -pct y +pct (uno a la vez) y mide el Calmar
+    y el retorno total. signal_exit_after es categórico y no se varía."""
+    def run(q):
+        sp, bp = to_params(q)
+        s = summary(run_strategy(df, sp, bp))
+        return s["calmar"], s["retorno_total"]
+
+    base_calmar, base_ret = run(p)
+    rows = {}
+    for key, value in p.items():
+        if key == "signal_exit_after":
+            continue
+        row = {"base_calmar": base_calmar, "base_retorno": base_ret}
+        for sign, tag in ((-1, "-20%"), (1, "+20%")):
+            v = value * (1 + sign * pct)
+            q = {**p, key: max(2, round(v)) if isinstance(value, int) else v}
+            row[f"calmar_{tag}"], row[f"retorno_{tag}"] = run(q)
+        rows[key] = row
+    return pd.DataFrame(rows).T
+
+
+def cost_curve(df: pd.DataFrame, p: dict, fees_bps=tuple(np.arange(0, 52.5, 2.5))) -> pd.DataFrame:
+    """Pregunta 4: retorno total contra comisión por lado (en puntos base; el lab fija 12.5)."""
+    sp, bp = to_params(p)
+    rows = {}
+    for bps in fees_bps:
+        res = run_strategy(df, sp, replace(bp, fee=bps / 1e4))
+        rows[bps] = {
+            "retorno_total": res.equity.iloc[-1] / res.equity.iloc[0] - 1,
+            "operaciones": len(res.trades),
+        }
+    return pd.DataFrame(rows).T.rename_axis("comision_por_lado_bps")
+
+
+def breakeven_fee(curve: pd.DataFrame):
+    """Comisión por lado (bps) en la que el retorno total cruza cero, por interpolación lineal.
+    None si el retorno nunca pasa de positivo a no positivo en el rango."""
+    points = list(curve["retorno_total"].items())
+    for (f0, r0), (f1, r1) in zip(points, points[1:]):
+        if r0 > 0 >= r1:
+            return f0 + (f1 - f0) * r0 / (r0 - r1)
+    return None
