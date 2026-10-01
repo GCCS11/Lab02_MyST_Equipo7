@@ -1,5 +1,7 @@
+"""Métricas de desempeño: retorno, riesgo, Sharpe, Sortino, Calmar, drawdown, win rate, turnover."""
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 BARS_PER_YEAR = 365 * 288  # BTC opera 24/7; barras de 5 minutos
 
@@ -59,6 +61,36 @@ def annual_turnover(equity: pd.Series, traded_notional: float) -> float:
     return traded_notional / equity.mean() / years_of_data(equity)
 
 
+def periodic_returns(equity: pd.Series, freq: str) -> pd.Series:
+    """Retorno por periodo calendario ('M' mensual, 'Q' trimestral, 'Y' anual). Los periodos
+    sin datos se saltan: cada retorno se mide contra el cierre del periodo anterior con datos,
+    y el primero contra el valor inicial."""
+    e = equity.copy()
+    e.index = e.index.tz_localize(None)
+    last = e.groupby(e.index.to_period(freq)).last()
+    previous = np.r_[e.iloc[0], last.to_numpy()[:-1]]
+    return pd.Series(last.to_numpy() / previous - 1, index=last.index, name=f"retorno_{freq}")
+
+
+def trade_returns(trades: pd.DataFrame, fee: float = 0.00125) -> pd.DataFrame:
+    """Agrega a la bitácora el retorno bruto y neto de comisiones de cada operación, en % del
+    precio de entrada (fee es la comisión por lado; el lab fija 0.125%)."""
+    t = trades.copy()
+    t["bruto_pct"] = t["side"] * (t["exit_price"] / t["entry_price"] - 1) * 100
+    t["neto_pct"] = t["bruto_pct"] - fee * 100 * (1 + t["exit_price"] / t["entry_price"])
+    return t
+
+
+def compare_groups(a, b, n_boot: int = 5000, seed: int = 42) -> dict:
+    """Diferencia de medias entre dos muestras, con prueba de Welch e intervalo bootstrap del 95%."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    _, p_value = stats.ttest_ind(a, b, equal_var=False)
+    rng = np.random.default_rng(seed)
+    diffs = [rng.choice(a, len(a)).mean() - rng.choice(b, len(b)).mean() for _ in range(n_boot)]
+    low, high = np.percentile(diffs, [2.5, 97.5])
+    return {"diferencia_media": a.mean() - b.mean(), "p_welch": p_value, "ic95_bajo": low, "ic95_alto": high}
+
+
 def summary(result) -> dict:
     """Todas las métricas de un BacktestResult en un diccionario."""
     eq = result.equity
@@ -75,5 +107,3 @@ def summary(result) -> dict:
         "turnover_anual": annual_turnover(eq, result.traded_notional),
         "costos_totales": result.total_costs,
     }
-
-
