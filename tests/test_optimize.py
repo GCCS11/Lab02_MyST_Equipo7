@@ -1,4 +1,6 @@
-"""Pruebas de la función objetivo, del gate del walk-forward y del walk-forward por régimen."""
+"""Pruebas de la función objetivo, del gate del walk-forward, del walk-forward por régimen y de freeze_theta."""
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -7,6 +9,7 @@ from src.data import segment_ids
 from src.optimize import (
     NEVER,
     PENALTY,
+    freeze_theta,
     make_folds,
     regime_n_min,
     regime_window_objective,
@@ -107,4 +110,20 @@ def test_walk_forward_regimes_trades_and_labels_each_trade_with_a_regime():
     assert len(oos.trades) > 0, "la prueba sería vacía sin operaciones"
     assert set(oos.trades["regime"]) <= {0, 1, 2}
 
-    
+
+def test_freeze_theta_stores_none_when_gate_is_unreachable():
+    df, seg, feats, _ = regime_setup()
+    theta = freeze_theta(df, feats, seg, n_trials=3, n_min=1, gate=np.inf)
+    assert theta["single"]["params"] is None
+    assert all(r["params"] is None for r in theta["regimes"].values())
+
+
+def test_freeze_theta_is_serializable_and_complete_when_gate_is_permissive():
+    df, seg, feats, _ = regime_setup()
+    theta = freeze_theta(df, feats, seg, n_trials=3, n_min=1, gate=-np.inf)
+    restored = json.loads(json.dumps(theta))
+    assert set(restored["single"]["params"]) == set(P)
+    assert restored["meta"]["train_bars"] == len(df)
+    assert set(restored["regimes"]) == {"reversion", "tendencia", "crisis"}
+
+

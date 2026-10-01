@@ -1,8 +1,8 @@
-"""Golden-file test: camino de 6 barras con el equity final calculado a mano."""
+"""Golden-file tests: caminos cortos con el equity calculado a mano."""
 import pandas as pd
 import pytest
 
-from src.backtest import BacktestParams, backtest
+from src.backtest import BacktestParams, RegimeSpec, backtest, backtest_regimes
 
 
 def test_backtest_matches_hand_calculation():
@@ -78,4 +78,50 @@ def test_start_blocks_entries_before_that_bar():
     assert res.trades["reason"].tolist() == ["stop_loss"]
 
 
-    
+def regime_path():
+    """5 barras: se abre un largo en el régimen 1 y al cierre de la barra 2 el régimen pasa a 2,
+    que no tiene spec (no se opera). ATR = 1, m=2, r=2, riesgo 1%, comisión 0.125%."""
+    idx = pd.date_range("2024-01-01", periods=5, freq="5min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "Open": [100, 100, 101, 103, 103],
+            "High": [101, 102, 103, 103.5, 104],
+            "Low": [99, 99, 100, 102, 102],
+            "Close": [100, 101, 102, 103, 104],
+        },
+        index=idx,
+        dtype=float,
+    )
+    signal = pd.Series([1, 0, 0, 1, 0], index=idx)
+    labels = pd.Series([1, 1, 2, 2, 2], index=idx)
+    spec = RegimeSpec(signal, pd.Series(1.0, index=idx), BacktestParams(m=2, r=2))
+    return df, pd.Series(0, index=idx), labels, {1: spec}
+
+
+def test_regime_change_closes_position_at_next_open():
+    df, seg, labels, specs = regime_path()
+    res = backtest_regimes(df, seg, labels, specs)
+
+    # Largo en la apertura de la barra 1 a 100: stop 98, target 104, qty = 10,000/2 = 5,000.
+    #   Nocional 500,000, comisión 625, efectivo = 1,000,000 - 500,000 - 625 = 499,375.
+    #   Cierre barra 1 (101): 499,375 + 505,000 = 1,004,375. Cierre barra 2 (102): 499,375 + 510,000 = 1,009,375.
+    # Al cierre de la barra 2 el régimen es 2 (sin spec): en la apertura de la barra 3 (103) se cierra.
+    #   +515,000 - comisión 643.75 => efectivo = 499,375 + 515,000 - 643.75 = 1,013,731.25.
+    #   La señal +1 de la barra 3 no abre nada en la barra 4: el régimen 2 no tiene spec.
+    expected = [1_000_000.0, 1_004_375.0, 1_009_375.0, 1_013_731.25, 1_013_731.25]
+    assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
+    assert res.trades["reason"].tolist() == ["regime_change"]
+
+
+def test_position_keeps_its_own_exit_when_regime_change_is_ignored():
+    df, seg, labels, specs = regime_path()
+    res = backtest_regimes(df, seg, labels, specs, close_on_change=False)
+
+    # Mismo camino hasta la barra 2. Sin cierre por cambio de régimen, la posición sigue con su
+    # stop 98 y su target 104. Barra 3: máximo 103.5 y mínimo 102, no toca nada.
+    #   Cierre barra 3 (103): 499,375 + 515,000 = 1,014,375.
+    # Barra 4: el máximo (104) toca el target 104. Salida a 104: +520,000 - 650 =>
+    #   efectivo = 499,375 + 520,000 - 650 = 1,018,725.
+    expected = [1_000_000.0, 1_004_375.0, 1_009_375.0, 1_014_375.0, 1_018_725.0]
+    assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
+    assert res.trades["reason"].tolist() == ["take_profit"]
