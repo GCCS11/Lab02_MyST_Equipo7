@@ -1,0 +1,21 @@
+[     0 s] Cargando, limpiando y auditando datos
+[     0 s] Walk-forward con un solo theta: 65 ventanas x 150 pruebas
+  ventana 10 de 65  (24 s)
+  ventana 20 de 65  (48 s)
+  ventana 30 de 65  (73 s)
+  ventana 40 de 65  (97 s)
+  ventana 50 de 65  (125 s)
+  ventana 60 de 65  (154 s)
+[   166 s] Walk-forward con un theta por régimen
+  ventana 10 de 65  (46 s)
+  ventana 20 de 65  (91 s)
+  ventana 30 de 65  (139 s)
+  ventana 40 de 65  (180 s)
+  ventana 50 de 65  (224 s)
+  ventana 60 de 65  (270 s)
+[   461 s] Recalculando theta sobre todo el train
+[   531 s] theta recalculado IGUAL al congelado (docs/theta_frozen.json)
+[   531 s] Evaluando en test con theta congelado
+[   531 s] Robustez: 2 de 3 contra un indicador, sensibilidad de ±20% y curva de costos
+[   538 s] Generando figuras
+[   542 s] Listo. Tablas en docs/tables y figuras en docs/figures

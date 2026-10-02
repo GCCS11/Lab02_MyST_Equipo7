@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src import plots
+from src.backtest import INITIAL_CASH
 from src.data import (
     audit_prices,
     check_no_overlap,
@@ -103,11 +104,29 @@ def train_walk_forward(train, feats, seg, n_trials):
     return table_single, table_regimes, results
 
 
-def regime_differentiation(trades: pd.DataFrame) -> dict:
-    """Pregunta 5: retorno por operación en cada régimen y prueba entre reversión y tendencia."""
+def regime_differentiation(trades: pd.DataFrame, dataset: str = "train") -> dict:
+    """Pregunta 5: desempeño por régimen de entrada (operaciones, win rate, retorno por operación,
+    contribución al capital) y prueba entre reversión y tendencia. Guarda también cómo terminan
+    las operaciones (stop, target, señal, cambio de régimen, etc.)."""
+    if trades.empty:
+        return {}
     t = trade_returns(trades)
     t["regimen"] = t["regime"].map(NAMES)
-    save_table(t.groupby("regimen")[["bruto_pct", "neto_pct"]].agg(["count", "mean"]), "desempeno_por_regimen_train")
+    t["pnl_pct_capital"] = t["pnl"] / INITIAL_CASH * 100  # % del capital con que arrancó la semana
+    g = t.groupby("regimen")
+    table = pd.DataFrame(
+        {
+            "operaciones": g.size(),
+            "win_rate": g["pnl"].apply(lambda s: (s > 0).mean()),
+            "bruto_medio_pct": g["bruto_pct"].mean(),
+            "neto_medio_pct": g["neto_pct"].mean(),
+            "neto_desv_pct": g["neto_pct"].std(),
+            "razon_media_desv": g["neto_pct"].mean() / g["neto_pct"].std(),
+            "contribucion_capital_pct": g["pnl_pct_capital"].sum(),
+        }
+    )
+    save_table(table, f"desempeno_por_regimen_{dataset}")
+    save_table(t["reason"].value_counts().to_frame("operaciones"), f"salidas_por_motivo_{dataset}")
     a = t.loc[t["regimen"] == "reversion", "bruto_pct"]
     b = t.loc[t["regimen"] == "tendencia", "bruto_pct"]
     return compare_groups(a, b) if min(len(a), len(b)) > 1 else {}
@@ -205,6 +224,7 @@ def main() -> None:
         "diferenciacion_reversion_vs_tendencia": regime_differentiation(train_results["theta_por_regimen"].trades),
     }
     theta, test_results = freeze_and_evaluate(train, test, feats, seg, n_trials, quick)
+    regime_differentiation(test_results["theta_por_regimen"].trades, "test")
     regimes_fitted = table_regimes[["is_reversion", "is_tendencia", "is_crisis"]].notna().sum().sum()
     frozen_fits = 1 + sum(r["calmar"] is not None for r in theta["regimes"].values())
     summary_numbers.update(
