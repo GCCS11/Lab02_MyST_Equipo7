@@ -31,3 +31,6 @@ Referencia en las mismas semanas: comprar y mantener +90.1%, Sharpe 1.51, drawdo
 - Prueba formal de diferencias entre regímenes (pregunta 5).
 - Sensibilidad de parámetros de más y menos 20%, y curva de retorno neto contra costo de transacción.
 - Evaluación final sobre test con parámetros congelados y commit antes de ejecutarla.
+
+## Código de la exploración de régimen
+El código de K-means y del HMM con probabilidades filtradas, usado para comparar métodos de régimen, se retiró del repositorio al final del proyecto. Se conserva en la etiqueta de git `exploracion-regimenes`.

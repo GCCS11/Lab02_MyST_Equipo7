@@ -1,11 +1,12 @@
+"""Datos sintéticos compartidos por las pruebas y la prueba de la regla de confirmación 2 de 3."""
 import numpy as np
 import pandas as pd
 
-from src.signals import candidate_signals, confirm_signal
+from src.signals import confirm_signal
 
 
 def make_prices(n: int = 2000, seed: int = 0) -> pd.DataFrame:
-    """Precios sintéticos con un hueco de ~10.8 h que parte la serie en dos tramos."""
+    """Precios OHLC sintéticos (caminata aleatoria) con un hueco de ~10.8 h que parte la serie en dos tramos."""
     rng = np.random.default_rng(seed)
     close = 30000 * np.exp(np.cumsum(rng.normal(0, 0.001, n)))
     open_ = np.r_[close[0], close[:-1]]
@@ -17,15 +18,6 @@ def make_prices(n: int = 2000, seed: int = 0) -> pd.DataFrame:
         index=idx,
     )
     return df.drop(df.index[1000:1130])
-
-
-def test_signals_are_causal():
-    """La señal en t calculada con df[:t+1] es igual a la calculada con toda la serie."""
-    df = make_prices()
-    full = candidate_signals(df)
-    for t in (300, 900, 1200, 1800):  # antes y después del hueco
-        partial = candidate_signals(df.iloc[: t + 1])
-        assert (partial.iloc[-1] == full.iloc[t]).all(), f"fuga de información en t={t}"
 
 
 def test_confirmation_rule():

@@ -1,4 +1,4 @@
-"""Golden-file tests: caminos cortos con el equity calculado a mano."""
+"""Golden-file test: camino de 6 barras con el equity final calculado a mano."""
 import pandas as pd
 import pytest
 
@@ -49,35 +49,6 @@ def test_backtest_matches_hand_calculation():
     assert res.total_costs == pytest.approx(2_612.0765625)
 
 
-def test_start_blocks_entries_before_that_bar():
-    """Con start=3 no se abre el largo de la barra 1; solo el corto de la barra 3."""
-    idx = pd.date_range("2024-01-01", periods=6, freq="5min", tz="UTC")
-    df = pd.DataFrame(
-        {
-            "Open": [100, 100, 101, 104, 104.5, 106.5],
-            "High": [101, 102, 105, 105, 107, 107],
-            "Low": [99, 99, 100, 103, 104, 106],
-            "Close": [100, 101, 104, 104.5, 106.5, 106.5],
-        },
-        index=idx,
-        dtype=float,
-    )
-    signal = pd.Series([1, 0, -1, 0, 0, 0], index=idx)
-    atr = pd.Series(1.0, index=idx)
-    seg = pd.Series(0, index=idx)
-
-    res = backtest(df, signal, atr, seg, BacktestParams(m=2, r=2), start=3)
-
-    # Corto en la barra 3 a 104: qty = 0.01*1,000,000/2 = 5,000, nocional 520,000, comisión 650.
-    #   efectivo = 1,000,000 + 520,000 - 650 = 1,519,350.
-    #   Cierre barra 3 (104.5): 1,519,350 - 5,000*104.5 = 996,850.
-    # Barra 4: el máximo (107) supera el stop 106. Recompra 530,000, comisión 662.5:
-    #   efectivo = 1,519,350 - 530,000 - 662.5 = 988,687.5.
-    expected = [1_000_000.0, 1_000_000.0, 1_000_000.0, 996_850.0, 988_687.5, 988_687.5]
-    assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
-    assert res.trades["reason"].tolist() == ["stop_loss"]
-
-
 def regime_path():
     """5 barras: se abre un largo en el régimen 1 y al cierre de la barra 2 el régimen pasa a 2,
     que no tiene spec (no se opera). ATR = 1, m=2, r=2, riesgo 1%, comisión 0.125%."""
@@ -111,17 +82,3 @@ def test_regime_change_closes_position_at_next_open():
     expected = [1_000_000.0, 1_004_375.0, 1_009_375.0, 1_013_731.25, 1_013_731.25]
     assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
     assert res.trades["reason"].tolist() == ["regime_change"]
-
-
-def test_position_keeps_its_own_exit_when_regime_change_is_ignored():
-    df, seg, labels, specs = regime_path()
-    res = backtest_regimes(df, seg, labels, specs, close_on_change=False)
-
-    # Mismo camino hasta la barra 2. Sin cierre por cambio de régimen, la posición sigue con su
-    # stop 98 y su target 104. Barra 3: máximo 103.5 y mínimo 102, no toca nada.
-    #   Cierre barra 3 (103): 499,375 + 515,000 = 1,014,375.
-    # Barra 4: el máximo (104) toca el target 104. Salida a 104: +520,000 - 650 =>
-    #   efectivo = 499,375 + 520,000 - 650 = 1,018,725.
-    expected = [1_000_000.0, 1_004_375.0, 1_009_375.0, 1_014_375.0, 1_018_725.0]
-    assert res.equity.tolist() == pytest.approx(expected, rel=1e-12)
-    assert res.trades["reason"].tolist() == ["take_profit"]

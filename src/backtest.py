@@ -171,7 +171,6 @@ def backtest_regimes(
     labels,
     specs: dict,
     start: int = 0,
-    close_on_change: bool = True,
 ) -> BacktestResult:
     """Backtest event-driven, sin estado global, con parámetros distintos por régimen.
 
@@ -179,8 +178,7 @@ def backtest_regimes(
     régimen su RegimeSpec; un régimen sin spec es un régimen en el que no se opera.
     La señal y la etiqueta de la barra t-1 (calculadas al cierre) se ejecutan en la
     apertura de t. Orden de eventos dentro de cada barra t:
-      1. Salida a la apertura: si cambió el régimen (con close_on_change), por señal
-         opuesta o por holding máximo. La posición conserva los parámetros del régimen
+      1. Salida a la apertura: si cambió el régimen, por señal opuesta o por holding máximo. La posición conserva los parámetros del régimen
          en que se abrió.
       2. Entrada a la apertura si no hay posición, el régimen vigente tiene spec y su
          señal es distinta de 0, con los parámetros de ese régimen.
@@ -208,7 +206,7 @@ def backtest_regimes(
         if pos is not None:
             pp = specs[pos_regime].params
             own_sig = sig_by[pos_regime][i - 1] if same_segment else 0
-            if close_on_change and reg != pos_regime:
+            if reg != pos_regime:
                 pf.close(o[i], times[i], "regime_change")
             elif own_sig == -pos.side and i - entry_i >= pp.signal_exit_after:
                 pf.close(o[i], times[i], "signal")

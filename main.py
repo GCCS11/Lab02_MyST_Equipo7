@@ -2,6 +2,7 @@
 en docs/figures. `python main.py --quick` usa pocas pruebas por ventana para comprobar que todo
 corre; sus resultados no son los del reporte y no tocan docs/theta_frozen.json."""
 import argparse
+import itertools
 import json
 import random
 import time
@@ -35,6 +36,7 @@ from src.optimize import (
     walk_forward_regimes,
 )
 from src.regimes import NAMES, RuleRegimes, hold_labels, regime_features, regime_report
+from src.signals import candidate_signals
 
 SEED = 42  # semilla de random, numpy y Optuna (src/optimize.py)
 QUICK_TRIALS = 8
@@ -87,6 +89,20 @@ def prepare_data():
         validate_prices(d)
     check_no_overlap(train, test)
     return train, test
+
+
+def indicator_selection(train: pd.DataFrame) -> None:
+    """Elección de indicadores sin mirar retornos: correlación entre las cinco señales candidatas
+    (parámetros por defecto) y correlación media y máxima de cada trío con un indicador por familia
+    (tendencia, momento y volatilidad)."""
+    corr = candidate_signals(train).corr()
+    save_table(corr, "correlacion_indicadores")
+    families = (("ema_cross", "donchian"), ("rsi", "roc"), ("keltner",))
+    rows = {}
+    for trio in itertools.product(*families):
+        pairs = [corr.loc[a, b] for a, b in itertools.combinations(trio, 2)]
+        rows[" + ".join(trio)] = {"correlacion_media": np.mean(pairs), "correlacion_maxima": np.max(pairs)}
+    save_table(pd.DataFrame(rows).T, "correlacion_trios")
 
 
 def train_walk_forward(train, feats, seg, n_trials):
@@ -214,6 +230,7 @@ def main() -> None:
     train, test = prepare_data()
     seg = segment_ids(train)
     feats = regime_features(train, seg)
+    indicator_selection(train)
 
     table_single, table_regimes, train_results = train_walk_forward(train, feats, seg, n_trials)
     summary_numbers = {

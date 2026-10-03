@@ -166,7 +166,7 @@ def optimize_regime_window(
     return _tpe_study(lambda p: regime_window_objective(df, seg, labels, regime, p, n_min), n_trials, seed)
 
 
-def run_regime_oos(df, seg, labels, fold: Fold, thetas: dict, close_on_change: bool = True):
+def run_regime_oos(df, seg, labels, fold: Fold, thetas: dict):
     """Evalúa en la semana de prueba los θ congelados de cada régimen (thetas: régimen -> params).
     Los indicadores arrancan `warm` barras antes de la prueba y no se abre nada antes de ella."""
     parsed = {r: to_params(p) for r, p in thetas.items()}
@@ -178,7 +178,7 @@ def run_regime_oos(df, seg, labels, fold: Fold, thetas: dict, close_on_change: b
         signal, atr_series = strategy_signal(window, seg_w, sp)
         specs[r] = RegimeSpec(signal, atr_series, bp)
     start = fold.train_end - lo
-    res = backtest_regimes(window, seg_w, labels.iloc[lo : fold.test_end], specs, start, close_on_change)
+    res = backtest_regimes(window, seg_w, labels.iloc[lo : fold.test_end], specs, start)
     return res, start
 
 
@@ -261,7 +261,6 @@ def walk_forward_regimes(
     n_trials: int = N_TRIALS,
     n_min: int = N_MIN_TRADES,
     gate: float = 0.0,
-    close_on_change: bool = True,
     verbose: bool = False,
 ):
     """Walk-forward con un θ por régimen.
@@ -270,7 +269,7 @@ def walk_forward_regimes(
     final de la ventana de entrenamiento y quedan fijos para la semana de prueba. Cada régimen
     con al menos B_MIN_BARS barras en la ventana optimiza su propio θ solo sobre las barras
     en que rige; si su mejor Calmar no supera `gate`, no se opera en ese régimen esa semana.
-    Una posición se cierra al cambiar el régimen (si close_on_change).
+    Una posición se cierra en la apertura siguiente al cambiar el régimen.
 
     Devuelve (tabla por fold, resultado OOS encadenado, benchmark comprar y mantener)."""
 
@@ -297,7 +296,7 @@ def walk_forward_regimes(
         test_index = df.index[f.train_end : f.test_end]
         if not thetas:
             return pd.Series(1.0, index=test_index), pd.DataFrame(), 0.0, 0.0, row
-        res, start = run_regime_oos(df, seg, labels, f, thetas, close_on_change)
+        res, start = run_regime_oos(df, seg, labels, f, thetas)
         path = res.equity.iloc[start:] / INITIAL_CASH
         return path, res.trades, res.total_costs, res.traded_notional, row
 
