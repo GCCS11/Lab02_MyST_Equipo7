@@ -5,6 +5,7 @@ import argparse
 import itertools
 import json
 import random
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,9 +23,10 @@ from src.data import (
     segment_ids,
     validate_prices,
 )
-from src.metrics import compare_groups, periodic_returns, summary, trade_returns
+from src.metrics import compare_groups, market_exposure, periodic_returns, summary, trade_returns
 from src.optimize import (
     N_TRIALS,
+    SEED,
     breakeven_fee,
     confirmation_effect,
     cost_curve,
@@ -38,7 +40,6 @@ from src.optimize import (
 from src.regimes import NAMES, RuleRegimes, hold_labels, regime_features, regime_report
 from src.signals import candidate_signals
 
-SEED = 42  # semilla de random, numpy y Optuna (src/optimize.py)
 QUICK_TRIALS = 8
 LAB_FEE_BPS = 12.5  # comisión por lado fijada por el lab
 DATA, DOCS = Path("data"), Path("docs")
@@ -164,6 +165,8 @@ def freeze_and_evaluate(train, test, feats, seg, n_trials, quick):
     log("Evaluando en test con theta congelado")
     results = evaluate_frozen(train, test, theta)
     save_table(metrics_table(results), "metricas_test")
+    exposure = {k: market_exposure(r, test["Close"]) for k, r in results.items() if k != "comprar_y_mantener"}
+    save_table(pd.DataFrame(exposure).T, "exposicion_test")
     save_periodic_returns(results, "test")
     return theta, results
 
@@ -219,9 +222,13 @@ def make_figures(train_results, test_results, full, feats, labels):
 
 
 def main() -> None:
+    global TABLES, FIGURES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="pocas pruebas por ventana (solo para verificar)")
     quick = parser.parse_args().quick
+    if quick:  # no sobrescribe las tablas ni las figuras del reporte
+        out = Path(tempfile.gettempdir()) / "lab02_quick"
+        TABLES, FIGURES = out / "tables", out / "figures"
     random.seed(SEED)
     np.random.seed(SEED)
     n_trials = QUICK_TRIALS if quick else N_TRIALS

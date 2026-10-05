@@ -25,3 +25,15 @@ def test_accounting_matches_trades():
     assert p.trades[0]["pnl"] == pytest.approx(expected_pnl)
     assert p.equity(110.0) == pytest.approx(1_000_000 + expected_pnl)
     assert p.total_costs == pytest.approx(FEE * p.traded_notional)
+
+
+def test_equity_with_open_position_and_costs_per_fill():
+    """Con una posición abierta, el valor es efectivo + side*qty*precio; los costos suman
+    la comisión de cada apertura y cada cierre."""
+    p = Portfolio(1_000_000)
+    p.open(Position(-1, 3.0, 100.0, 105.0, 95.0, T0))
+    assert p.equity(102.0) == pytest.approx(p.cash - 3.0 * 102.0)
+    assert p.equity(102.0) == pytest.approx(1_000_000 - FEE * 300.0 - 3.0 * 2.0)
+    p.close(102.0, T0, "signal")
+    p.open(Position(1, 1.0, 102.0, 97.0, 110.0, T0))
+    assert p.total_costs == pytest.approx(FEE * (300.0 + 306.0 + 102.0))

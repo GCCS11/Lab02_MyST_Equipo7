@@ -1,4 +1,4 @@
-""""Optimización de hiperparámetros y walk-forward (con un solo θ o con un θ por régimen)."""
+"""Optimización de hiperparámetros y walk-forward (con un solo θ o con un θ por régimen)."""
 import time
 from dataclasses import dataclass, replace
 

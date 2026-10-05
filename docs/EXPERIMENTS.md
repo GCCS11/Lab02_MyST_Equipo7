@@ -25,12 +25,11 @@ Referencia en las mismas semanas: comprar y mantener +90.1%, Sharpe 1.51, drawdo
 
 ## Limitaciones conocidas del procedimiento
 - Cada semana de prueba cierra a la fuerza lo que tenga abierto (56 de 430 salidas en la ejecución 3), lo que castiga el holding largo.
-- Con ventanas de un mes la crisis tiene datos en solo 14 de 65 ventanas.
+- Con ventanas de un mes la crisis tiene datos suficientes (288 barras o más) en solo 13 de 65 ventanas (14 tienen alguna barra de crisis).
 
-## Pendiente
-- Prueba formal de diferencias entre regímenes (pregunta 5).
-- Sensibilidad de parámetros de más y menos 20%, y curva de retorno neto contra costo de transacción.
-- Evaluación final sobre test con parámetros congelados y commit antes de ejecutarla.
+## Hecho después de esta bitácora
+- Prueba de diferencias entre regímenes (Welch y bootstrap), sensibilidad de ±20% y curva de costos: ver docs/tables.
+- Parámetros congelados en el commit 43aa031 y evaluados una sola vez en prueba: docs/tables/metricas_test.csv.
 
 ## Código de la exploración de régimen
 El código de K-means y del HMM con probabilidades filtradas, usado para comparar métodos de régimen, se retiró del repositorio al final del proyecto. Se conserva en la etiqueta de git `exploracion-regimenes`.

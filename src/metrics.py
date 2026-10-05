@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from src.backtest import FEE
+
 BARS_PER_YEAR = 365 * 288  # BTC opera 24/7; barras de 5 minutos
 
 
@@ -72,7 +74,7 @@ def periodic_returns(equity: pd.Series, freq: str) -> pd.Series:
     return pd.Series(last.to_numpy() / previous - 1, index=last.index, name=f"retorno_{freq}")
 
 
-def trade_returns(trades: pd.DataFrame, fee: float = 0.00125) -> pd.DataFrame:
+def trade_returns(trades: pd.DataFrame, fee: float = FEE) -> pd.DataFrame:
     """Agrega a la bitácora el retorno bruto y neto de comisiones de cada operación, en % del
     precio de entrada (fee es la comisión por lado; el lab fija 0.125%)."""
     t = trades.copy()
@@ -89,6 +91,24 @@ def compare_groups(a, b, n_boot: int = 5000, seed: int = 42) -> dict:
     diffs = [rng.choice(a, len(a)).mean() - rng.choice(b, len(b)).mean() for _ in range(n_boot)]
     low, high = np.percentile(diffs, [2.5, 97.5])
     return {"diferencia_media": a.mean() - b.mean(), "p_welch": p_value, "ic95_bajo": low, "ic95_alto": high}
+
+
+def market_exposure(result, close: pd.Series) -> dict:
+    """Fracción de las barras con posición abierta y exposición (nocional / valor del portafolio)
+    mientras la hay. Sirve para interpretar la volatilidad de una estrategia."""
+    equity = result.equity
+    price = close.reindex(equity.index)
+    notional = pd.Series(0.0, index=equity.index)
+    for t in result.trades.itertuples():
+        held = (equity.index >= t.entry_time) & (equity.index <= t.exit_time)
+        notional[held] = t.qty * price[held]
+    invested = notional > 0
+    ratio = (notional / equity)[invested]
+    return {
+        "barras_con_posicion_%": 100 * invested.mean(),
+        "exposicion_media_%": 100 * ratio.mean() if invested.any() else 0.0,
+        "exposicion_maxima_%": 100 * ratio.max() if invested.any() else 0.0,
+    }
 
 
 def summary(result) -> dict:

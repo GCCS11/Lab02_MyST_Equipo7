@@ -5,7 +5,7 @@
 - Train: 2022-06-01 a 2023-12-31. Test: 2023-12-31 a 2024-06-03.
 - Limpieza (`src/data.py`): se descartan barras con OHLC vacío (3,745 en train, 17 en test) y barras fuera de la rejilla de 5 min (573 y 3, todas planas y sin volumen). No se rellena nada. Se quita del test la barra compartida con el train. Train queda en 162,132 barras y test en 9,366.
 - Tramos continuos: un hueco mayor a 6 h abre un tramo nuevo. Train tiene 4 tramos y test 2 (un día de diciembre y 31.5 días de mayo-junio, con un salto de 122 días entre ellos). Los indicadores se calculan dentro de cada tramo y ninguna posición cruza un corte.
-- Validación: no hay conjunto aparte. Las semanas de prueba del walk-forward dentro de train hacen de validación, y el test se usa una sola vez al final con los parámetros congelados. (Pendiente: definir si el test se evalúa con parámetros fijos o repitiendo el walk-forward.)
+- Validación: no hay conjunto aparte. Las semanas de prueba del walk-forward dentro de train hacen de validación, y el test se usa una sola vez al final con los parámetros congelados. El test se evalúa una sola vez con parámetros fijos (docs/theta_frozen.json); no se repite el walk-forward porque el tramo de prueba de 31 días no alcanza para una ventana de 37 días.
 
 ## 2. Features
 Tres indicadores de tres familias. Selección: matriz de correlación de las señales con parámetros por defecto en train (sin mirar retornos); este trío tiene la menor correlación media entre pares (0.36).
@@ -42,8 +42,8 @@ q = min( rho * V / (m * ATR), V / (P * (1 + comisión)) )
 
 ## 6. Costos
 - Comisión: 0.125% por operación, en la entrada y en la salida (parámetro fijo del lab). El ida y vuelta es 0.25% del nocional.
-- Slippage: 0 en el caso base. Se explora como sensibilidad (0 a 50 bps de ida y vuelta) y con el spread estimado por el modelo de Roll.
-- Borrow fee: 0 en el caso base. (Pendiente: justificar y, si procede, barrer.)
+- Slippage: 0 en el caso base. Se explora como sensibilidad con la curva de comisión de 0 a 50 puntos base por lado.
+- Borrow fee: 0 en el caso base. Se declara como limitación en el reporte (no se modela el costo de préstamo de los cortos).
 
 ## 7. Convenciones
 - Señal al cierre de t, ejecución en la apertura de t+1.
