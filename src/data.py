@@ -7,6 +7,13 @@ BAR = pd.Timedelta("5min")
 BREAK_GAP = pd.Timedelta("6h")  # un hueco mayor abre un tramo nuevo
 OHLC = ["Open", "High", "Low", "Close"]
 
+# Periodos de trabajo, elegidos porque no tienen huecos de datos: (archivo de origen, inicio, fin exclusivo, UTC).
+PERIODS = {
+    "train": ("train", "2023-07-01", "2023-12-01"),
+    "test": ("train", "2023-12-01", "2024-01-01"),
+    "validacion": ("test", "2024-05-01", "2024-07-01"),
+}
+
 
 def load_prices(path: str | Path) -> pd.DataFrame:
     """Carga un CSV de barras de 5 min indexado por tiempo UTC (sin limpiar)."""
@@ -29,18 +36,21 @@ def clean_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df[_on_grid(df)].dropna(subset=OHLC)
 
 
-def drop_overlap(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
-    """Quita del test las barras que ya están en el train, verificando que sean iguales."""
-    shared = test.index.intersection(train.index)
-    if len(shared) and not train.loc[shared, OHLC].equals(test.loc[shared, OHLC]):
-        raise ValueError("Las barras compartidas entre train y test difieren")
-    return test[test.index > train.index[-1]]
+def select_period(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """Barras con start <= tiempo < end (UTC)."""
+    return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index < pd.Timestamp(end, tz="UTC"))]
 
 
 def segment_ids(df: pd.DataFrame, max_gap: pd.Timedelta = BREAK_GAP) -> pd.Series:
     """Etiqueta tramos continuos: un hueco mayor a max_gap abre un tramo nuevo."""
     new_segment = df.index.to_series().diff() > max_gap
     return new_segment.cumsum().rename("segment")
+
+
+def check_continuous(df: pd.DataFrame, name: str) -> None:
+    """Falla si el periodo tiene un hueco mayor a BREAK_GAP: los periodos de trabajo no deben tener huecos."""
+    if segment_ids(df).nunique() != 1:
+        raise ValueError(f"El periodo {name} tiene huecos mayores a {BREAK_GAP}")
 
 
 def validate_prices(df: pd.DataFrame) -> None:
@@ -57,10 +67,10 @@ def validate_prices(df: pd.DataFrame) -> None:
         raise ValueError("Hay precios no positivos")
 
 
-def check_no_overlap(train: pd.DataFrame, test: pd.DataFrame) -> None:
-    """Verifica que el test empiece después de que termine el train."""
-    if train.index[-1] >= test.index[0]:
-        raise ValueError("Train y test se traslapan")
+def check_no_overlap(before: pd.DataFrame, after: pd.DataFrame) -> None:
+    """Verifica que `after` empiece después de que termine `before`."""
+    if before.index[-1] >= after.index[0]:
+        raise ValueError("Dos periodos se traslapan o están desordenados")
 
 
 def audit_prices(raw: pd.DataFrame) -> dict:

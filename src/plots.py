@@ -12,7 +12,6 @@ from src.metrics import drawdown_curve, periodic_returns
 from src.regimes import NAMES, UNLABELED
 
 REGIME_COLORS = {"reversion": "#4c78a8", "tendencia": "#54a24b", "crisis": "#e45756"}
-GAP = pd.Timedelta("6h")  # mismo umbral que abre un tramo nuevo en src/data.py
 
 
 def _save(fig, path) -> None:
@@ -30,32 +29,9 @@ def _format_dates(ax, money: bool = False) -> None:
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
 
 
-def _break_gaps(s: pd.Series) -> pd.Series:
-    """Inserta un NaN en cada hueco de datos para que la línea no una tramos distintos.
-    Solo se usa con precios, que sí cambian durante el hueco."""
-    jumps = s.index.to_series().diff() > GAP
-    if not jumps.any():
-        return s
-    breaks = pd.Series(np.nan, index=s.index[jumps] - pd.Timedelta("1ns"))
-    return pd.concat([s, breaks]).sort_index()
-
-
-def _shade_gaps(ax, index: pd.Index) -> bool:
-    """Sombrea en gris los huecos de datos (periodos sin barras). Devuelve True si hubo alguno."""
-    idx = index.to_series()
-    jumps = idx.diff() > GAP
-    for start, end in zip(idx.shift()[jumps], idx[jumps]):
-        ax.axvspan(start, end, color="lightgray", alpha=0.6, lw=0)
-    return bool(jumps.any())
-
-
 def _legend_below(ax, handles=None, ncol: int = 3, offset: float = -0.2) -> None:
     """Leyenda debajo del eje, para que no tape las curvas."""
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, offset), ncol=ncol, frameon=False)
-
-
-def _gap_patch() -> Patch:
-    return Patch(facecolor="lightgray", alpha=0.6, label="Hueco de datos (no hay barras)")
 
 
 def _regime_legend() -> list:
@@ -71,37 +47,39 @@ def _shade_regimes(ax, labels: pd.Series) -> None:
             ax.axvspan(part.index[0], part.index[-1], color=REGIME_COLORS[NAMES[code]], alpha=0.25, lw=0)
 
 
-def plot_equity(train_curves: dict, test_curves: dict, path) -> None:
-    """Figura 1: valor del portafolio en entrenamiento y en prueba, con su benchmark."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4.8))
-    titles = ("Entrenamiento (semanas fuera de muestra del walk-forward)", "Prueba (parámetros congelados)")
-    for ax, curves, title in zip(axes, (train_curves, test_curves), titles):
-        has_gap = _shade_gaps(ax, next(iter(curves.values())).index)
+def _panels(n: int):
+    """Una fila de n paneles, cada uno con su propio eje de fechas (los conjuntos no son contiguos)."""
+    fig, axes = plt.subplots(1, n, figsize=(5.6 * n, 4.8))
+    return fig, np.atleast_1d(axes)
+
+
+def plot_equity(sets: dict, path) -> None:
+    """Figura 1: valor del portafolio en cada conjunto de datos (un panel por conjunto), con su benchmark.
+    `sets` asigna a cada título de panel un diccionario nombre -> serie de equity."""
+    fig, axes = _panels(len(sets))
+    for ax, (title, curves) in zip(axes, sets.items()):
         for name, s in curves.items():
             ax.plot(s.index, s.to_numpy(), label=name, lw=1.4)
-        ax.set_title(title)
+        ax.set_title(title, fontsize=10)
         ax.set_xlabel("Fecha (UTC)")
         ax.set_ylabel("Valor del portafolio (USD)")
-        handles, _ = ax.get_legend_handles_labels()
-        _legend_below(ax, handles + ([_gap_patch()] if has_gap else []), ncol=2, offset=-0.2)
+        _legend_below(ax, ncol=2, offset=-0.2)
         _format_dates(ax, money=True)
     fig.suptitle("Figura 1. Valor del portafolio a lo largo del tiempo")
     _save(fig, path)
 
 
-def plot_drawdown(train_curves: dict, test_curves: dict, path) -> None:
+def plot_drawdown(sets: dict, path) -> None:
     """Figura 2: curva de drawdown de cada serie de la figura 1."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4.8))
-    for ax, curves, title in zip(axes, (train_curves, test_curves), ("Entrenamiento", "Prueba")):
-        has_gap = _shade_gaps(ax, next(iter(curves.values())).index)
+    fig, axes = _panels(len(sets))
+    for ax, (title, curves) in zip(axes, sets.items()):
         for name, s in curves.items():
             d = drawdown_curve(s) * 100
             ax.plot(d.index, d.to_numpy(), label=name, lw=1.2)
-        ax.set_title(title)
+        ax.set_title(title, fontsize=10)
         ax.set_xlabel("Fecha (UTC)")
         ax.set_ylabel("Drawdown (%)")
-        handles, _ = ax.get_legend_handles_labels()
-        _legend_below(ax, handles + ([_gap_patch()] if has_gap else []), ncol=2, offset=-0.2)
+        _legend_below(ax, ncol=2, offset=-0.2)
         _format_dates(ax)
     fig.suptitle("Figura 2. Curva de drawdown")
     _save(fig, path)
@@ -145,17 +123,22 @@ def plot_returns_table(equity: pd.Series, title: str, path) -> None:
 
 
 def plot_sensitivity(table: pd.DataFrame, path) -> None:
-    """Figura 4: Calmar al variar cada parámetro óptimo en -20% y +20% (línea: valor base)."""
-    x = np.arange(len(table))
-    fig, ax = plt.subplots(figsize=(11, 4.8))
-    ax.bar(x - 0.2, table["calmar_-20%"], width=0.4, label="Parámetro -20%", color="#f58518")
-    ax.bar(x + 0.2, table["calmar_+20%"], width=0.4, label="Parámetro +20%", color="#4c78a8")
-    ax.axhline(table["base_calmar"].iloc[0], color="black", ls="--", label="Calmar con el parámetro óptimo")
-    ax.set_xticks(x, labels=table.index, rotation=30)
-    ax.set_xlabel("Parámetro variado")
-    ax.set_ylabel("Calmar")
-    ax.set_title("Figura 4. Sensibilidad de los parámetros óptimos ante variaciones de ±20%")
-    _legend_below(ax, ncol=3, offset=-0.3)
+    """Figura 4: Calmar de la estrategia al variar cada parámetro óptimo de un régimen en -20% y +20%
+    (línea: Calmar con los parámetros óptimos). `table` tiene índice (régimen, parámetro)."""
+    regimes = list(dict.fromkeys(table.index.get_level_values(0)))
+    fig, axes = plt.subplots(1, len(regimes), figsize=(5.6 * len(regimes), 4.8), sharey=True)
+    for ax, regime in zip(np.atleast_1d(axes), regimes):
+        part = table.loc[regime]
+        x = np.arange(len(part))
+        ax.bar(x - 0.2, part["calmar_-20%"], width=0.4, label="Parámetro -20%", color="#f58518")
+        ax.bar(x + 0.2, part["calmar_+20%"], width=0.4, label="Parámetro +20%", color="#4c78a8")
+        ax.axhline(part["base_calmar"].iloc[0], color="black", ls="--", label="Calmar con el parámetro óptimo")
+        ax.set_xticks(x, labels=part.index, rotation=45, ha="right")
+        ax.set_xlabel("Parámetro variado")
+        ax.set_title(f"Régimen: {regime}", fontsize=10)
+        ax.set_ylabel("Calmar de la estrategia completa")
+    _legend_below(np.atleast_1d(axes)[len(regimes) // 2], ncol=3, offset=-0.38)
+    fig.suptitle("Figura 4. Sensibilidad de los parámetros óptimos ante variaciones de ±20%")
     _save(fig, path)
 
 
@@ -174,20 +157,20 @@ def plot_cost_curve(curve: pd.DataFrame, breakeven_bps, lab_bps: float, path) ->
     _save(fig, path)
 
 
-def plot_regime_timeline(price: pd.Series, labels: pd.Series, path) -> None:
-    """Figura 6a: línea de tiempo de regímenes sobre el precio."""
-    fig, ax = plt.subplots(figsize=(14, 4.8))
-    p = _break_gaps(price)
-    has_gap = _shade_gaps(ax, price.index)
-    _shade_regimes(ax, labels.reindex(price.index).fillna(UNLABELED).astype(int))
-    ax.plot(p.index, p.to_numpy(), color="black", lw=0.6, label="Precio de cierre")
-    ax.set_xlabel("Fecha (UTC)")
-    ax.set_ylabel("Precio de cierre (USD)")
-    ax.set_title("Figura 6a. Línea de tiempo de regímenes sobre el precio")
-    _format_dates(ax, money=True)
-    extra = [_gap_patch()] if has_gap else []
-    _legend_below(ax, [*_regime_legend(), *extra, plt.Line2D([], [], color="black", lw=0.8, label="Precio de cierre")],
-                  ncol=5, offset=-0.16)
+def plot_regime_timeline(prices: dict, labels: pd.Series, path) -> None:
+    """Figura 6a: línea de tiempo de regímenes sobre el precio, un panel por conjunto.
+    `prices` asigna a cada título de panel la serie de cierres de ese conjunto."""
+    fig, axes = _panels(len(prices))
+    for ax, (title, price) in zip(axes, prices.items()):
+        _shade_regimes(ax, labels.reindex(price.index).fillna(UNLABELED).astype(int))
+        ax.plot(price.index, price.to_numpy(), color="black", lw=0.6)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("Fecha (UTC)")
+        ax.set_ylabel("Precio de cierre (USD)")
+        _format_dates(ax, money=True)
+    _legend_below(axes[len(axes) // 2], [*_regime_legend(), plt.Line2D([], [], color="black", lw=0.8, label="Precio de cierre")],
+                  ncol=4, offset=-0.2)
+    fig.suptitle("Figura 6a. Línea de tiempo de regímenes sobre el precio")
     _save(fig, path)
 
 
@@ -212,15 +195,13 @@ def plot_feature_distributions(feats: pd.DataFrame, labels: pd.Series, path) -> 
 
 def plot_equity_with_regimes(equity: pd.Series, labels: pd.Series, title: str, path) -> None:
     """Figura 6c: valor del portafolio con los regímenes superpuestos."""
-    fig, ax = plt.subplots(figsize=(14, 4.8))
-    has_gap = _shade_gaps(ax, equity.index)
+    fig, ax = plt.subplots(figsize=(10, 4.8))
     _shade_regimes(ax, labels.reindex(equity.index).fillna(UNLABELED).astype(int))
     ax.plot(equity.index, equity.to_numpy(), color="black", lw=1.2)
     ax.set_xlabel("Fecha (UTC)")
     ax.set_ylabel("Valor del portafolio (USD)")
     ax.set_title(f"Figura 6c. Valor del portafolio con regímenes superpuestos: {title}")
     _format_dates(ax, money=True)
-    extra = [_gap_patch()] if has_gap else []
-    _legend_below(ax, [*_regime_legend(), *extra, plt.Line2D([], [], color="black", lw=1.2, label="Valor del portafolio")],
-                  ncol=5, offset=-0.16)
+    _legend_below(ax, [*_regime_legend(), plt.Line2D([], [], color="black", lw=1.2, label="Valor del portafolio")],
+                  ncol=4, offset=-0.16)
     _save(fig, path)

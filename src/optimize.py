@@ -11,7 +11,6 @@ from src.backtest import (
     BacktestParams,
     BacktestResult,
     RegimeSpec,
-    backtest,
     backtest_regimes,
     run_strategy,
 )
@@ -21,7 +20,6 @@ from src.regimes import NAMES, RuleRegimes, hold_labels, regime_features
 from src.signals import (
     SignalParams,
     atr,
-    confirm_signal,
     donchian_signal,
     keltner_signal,
     roc_signal,
@@ -145,6 +143,31 @@ def run_oos(df: pd.DataFrame, fold: Fold, p: dict):
 # ---------------------------------------------------------------------------
 # Un θ por régimen
 # ---------------------------------------------------------------------------
+SINGLE_SIGNALS = {  # un indicador solo, con las ventanas de su θ (pregunta 1)
+    "donchian": lambda df, seg, sp: donchian_signal(df, seg, sp.n_donchian),
+    "roc": lambda df, seg, sp: roc_signal(df, seg, sp.n_roc),
+    "keltner": lambda df, seg, sp: keltner_signal(df, seg, sp.n_ema, sp.n_atr, sp.k),
+}
+
+
+def run_regime_strategy(
+    df, seg, labels, thetas: dict, signal: str = "2 de 3", fee: float | None = None
+) -> BacktestResult:
+    """Backtest de un θ por régimen (thetas: régimen -> params) sobre toda la serie. `signal` elige la
+    regla de 2 de 3 o un indicador solo (pregunta 1); `fee` reemplaza la comisión (pregunta 4)."""
+    specs = {}
+    for code, p in thetas.items():
+        sp, bp = to_params(p)
+        if fee is not None:
+            bp = replace(bp, fee=fee)
+        if signal == "2 de 3":
+            sig, atr_series = strategy_signal(df, seg, sp)
+        else:
+            sig, atr_series = SINGLE_SIGNALS[signal](df, seg, sp), atr(df, seg, sp.n_atr)
+        specs[code] = RegimeSpec(sig, atr_series, bp)
+    return backtest_regimes(df, seg, labels, specs)
+
+
 def regime_n_min(bars_regime: int, bars_window: int, n_min: int = N_MIN_TRADES) -> int:
     """Mínimo de operaciones exigido a un régimen: la misma densidad que el mínimo de la
     ventana completa, proporcional a las barras que el régimen ocupa (al menos 3)."""
@@ -153,10 +176,7 @@ def regime_n_min(bars_regime: int, bars_window: int, n_min: int = N_MIN_TRADES) 
 
 def regime_window_objective(df, seg, labels, regime: int, p: dict, n_min: int) -> float:
     """Calmar de la ventana operando solo mientras el régimen vigente sea `regime`."""
-    sp, bp = to_params(p)
-    signal, atr_series = strategy_signal(df, seg, sp)
-    spec = RegimeSpec(signal, atr_series, bp)
-    return _score(backtest_regimes(df, seg, labels, {regime: spec}), n_min)
+    return _score(run_regime_strategy(df, seg, labels, {regime: p}), n_min)
 
 
 def optimize_regime_window(
@@ -371,24 +391,26 @@ def buy_and_hold(test: pd.DataFrame, seg: pd.Series) -> BacktestResult:
     return BacktestResult(pd.concat(parts).rename("equity"), pd.DataFrame(), 0.0, 0.0)
 
 
-def evaluate_frozen(train: pd.DataFrame, test: pd.DataFrame, theta: dict) -> dict:
-    """Evalúa en test, una sola vez, los parámetros congelados (diccionario de freeze_theta).
+def evaluate_frozen(history: pd.DataFrame, target: pd.DataFrame, theta: dict) -> dict:
+    """Evalúa en `target`, una sola vez, los parámetros congelados (diccionario de freeze_theta).
 
-    Los indicadores y las variables de régimen se calculan sobre train + test, así que el
-    arranque del test usa el pasado de train (es causal) y no se abre ninguna posición antes
-    del primer dato de test. Los umbrales de régimen son los congelados, nunca se reajustan.
-    Una estrategia sin parámetros (el gate no se cumplió en train) no opera.
+    `history` son los datos anteriores a `target` (el train, o train + test para la validación). Los
+    indicadores y las variables de régimen se calculan sobre history + target, así que el arranque de
+    target usa el pasado (es causal; si hay un hueco de datos entre ambos, los indicadores arrancan de
+    nuevo) y no se abre ninguna posición antes del primer dato de target. Los umbrales de régimen son
+    los congelados, nunca se reajustan. Una estrategia sin parámetros (el gate no se cumplió en train)
+    no opera.
 
-    Devuelve {'theta_unico', 'theta_por_regimen', 'comprar_y_mantener'} con el equity de test."""
-    full = pd.concat([train, test])
+    Devuelve {'theta_unico', 'theta_por_regimen', 'comprar_y_mantener'} con el equity de target."""
+    full = pd.concat([history, target])
     seg = segment_ids(full)
-    n_train = len(train)
-    fold = Fold(0, n_train, len(full))
-    test_index = full.index[n_train:]
+    n_history = len(history)
+    fold = Fold(0, n_history, len(full))
+    target_index = full.index[n_history:]
 
     single_p = theta["single"]["params"]
     if single_p is None:
-        single = _flat_result(test_index)
+        single = _flat_result(target_index)
     else:
         res, start = run_oos(full, fold, single_p)
         single = BacktestResult(res.equity.iloc[start:], res.trades, res.total_costs, res.traded_notional)
@@ -396,7 +418,7 @@ def evaluate_frozen(train: pd.DataFrame, test: pd.DataFrame, theta: dict) -> dic
     by_code = {code: theta["regimes"][name]["params"] for code, name in NAMES.items()}
     thetas = {code: p for code, p in by_code.items() if p is not None}
     if not thetas:
-        regimes = _flat_result(test_index)
+        regimes = _flat_result(target_index)
     else:
         rules = RuleRegimes(theta["rules"]["vol_crisis"], theta["rules"]["r2_trend"])
         labels = hold_labels(rules.classify(regime_features(full, seg)), seg)
@@ -406,60 +428,51 @@ def evaluate_frozen(train: pd.DataFrame, test: pd.DataFrame, theta: dict) -> dic
     return {
         "theta_unico": single,
         "theta_por_regimen": regimes,
-        "comprar_y_mantener": buy_and_hold(test, seg.iloc[n_train:]),
+        "comprar_y_mantener": buy_and_hold(target, seg.iloc[n_history:]),
     }
 
 
 # ---------------------------------------------------------------------------
 # Análisis de robustez (sobre los parámetros congelados)
 # ---------------------------------------------------------------------------
-def confirmation_effect(df: pd.DataFrame, p: dict) -> pd.DataFrame:
+def confirmation_effect(df, seg, labels, thetas: dict) -> pd.DataFrame:
     """Pregunta 1: efecto de la regla 2 de 3 frente a cada indicador por separado, con los
-    mismos parámetros, el mismo stop, el mismo target y los mismos costos."""
-    sp, bp = to_params(p)
-    seg = segment_ids(df)
-    signals = {
-        "donchian": donchian_signal(df, seg, sp.n_donchian),
-        "roc": roc_signal(df, seg, sp.n_roc),
-        "keltner": keltner_signal(df, seg, sp.n_ema, sp.n_atr, sp.k),
-    }
-    signals["2 de 3"] = confirm_signal(pd.DataFrame(signals))
-    atr_series = atr(df, seg, sp.n_atr)
+    mismos parámetros por régimen, el mismo stop, el mismo target y los mismos costos."""
     rows = {}
-    for name, signal in signals.items():
-        s = summary(backtest(df, signal, atr_series, seg, bp))
+    for name in (*SINGLE_SIGNALS, "2 de 3"):
+        s = summary(run_regime_strategy(df, seg, labels, thetas, signal=name))
         rows[name] = {k: s[k] for k in ("n_operaciones", "retorno_total", "calmar", "sharpe", "win_rate")}
     return pd.DataFrame(rows).T
 
 
-def sensitivity(df: pd.DataFrame, p: dict, pct: float = 0.20) -> pd.DataFrame:
-    """Pregunta 3: varía cada parámetro numérico en -pct y +pct (uno a la vez) y mide el Calmar
-    y el retorno total. signal_exit_after es categórico y no se varía."""
+def sensitivity(df, seg, labels, thetas: dict, pct: float = 0.20) -> pd.DataFrame:
+    """Pregunta 3: varía cada parámetro numérico de cada régimen en -pct y +pct (uno a la vez) y mide
+    el Calmar y el retorno total de la estrategia completa. signal_exit_after es categórico y no se
+    varía. El índice del resultado es (régimen, parámetro)."""
     def run(q):
-        sp, bp = to_params(q)
-        s = summary(run_strategy(df, sp, bp))
+        s = summary(run_regime_strategy(df, seg, labels, q))
         return s["calmar"], s["retorno_total"]
 
-    base_calmar, base_ret = run(p)
+    base_calmar, base_ret = run(thetas)
     rows = {}
-    for key, value in p.items():
-        if key == "signal_exit_after":
-            continue
-        row = {"base_calmar": base_calmar, "base_retorno": base_ret}
-        for sign, tag in ((-1, "-20%"), (1, "+20%")):
-            v = value * (1 + sign * pct)
-            q = {**p, key: max(2, round(v)) if isinstance(value, int) else v}
-            row[f"calmar_{tag}"], row[f"retorno_{tag}"] = run(q)
-        rows[key] = row
+    for code, p in thetas.items():
+        for key, value in p.items():
+            if key == "signal_exit_after":
+                continue
+            row = {"base_calmar": base_calmar, "base_retorno": base_ret}
+            for sign, tag in ((-1, "-20%"), (1, "+20%")):
+                v = value * (1 + sign * pct)
+                q = {**p, key: max(2, round(v)) if isinstance(value, int) else v}
+                row[f"calmar_{tag}"], row[f"retorno_{tag}"] = run({**thetas, code: q})
+            rows[(NAMES[code], key)] = row
     return pd.DataFrame(rows).T
 
 
-def cost_curve(df: pd.DataFrame, p: dict, fees_bps=tuple(np.arange(0, 52.5, 2.5))) -> pd.DataFrame:
+def cost_curve(df, seg, labels, thetas: dict, fees_bps=tuple(np.arange(0, 52.5, 2.5))) -> pd.DataFrame:
     """Pregunta 4: retorno total contra comisión por lado (en puntos base; el lab fija 12.5)."""
-    sp, bp = to_params(p)
     rows = {}
     for bps in fees_bps:
-        res = run_strategy(df, sp, replace(bp, fee=bps / 1e4))
+        res = run_regime_strategy(df, seg, labels, thetas, fee=bps / 1e4)
         rows[bps] = {
             "retorno_total": res.equity.iloc[-1] / res.equity.iloc[0] - 1,
             "operaciones": len(res.trades),

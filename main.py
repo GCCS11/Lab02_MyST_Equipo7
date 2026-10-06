@@ -15,12 +15,14 @@ import pandas as pd
 from src import plots
 from src.backtest import INITIAL_CASH
 from src.data import (
+    PERIODS,
     audit_prices,
+    check_continuous,
     check_no_overlap,
     clean_prices,
-    drop_overlap,
     load_prices,
     segment_ids,
+    select_period,
     validate_prices,
 )
 from src.metrics import compare_groups, market_exposure, periodic_returns, summary, trade_returns
@@ -44,6 +46,12 @@ QUICK_TRIALS = 8
 LAB_FEE_BPS = 12.5  # comisión por lado fijada por el lab
 DATA, DOCS = Path("data"), Path("docs")
 TABLES, FIGURES = DOCS / "tables", DOCS / "figures"
+SET_TITLES = {  # título de cada conjunto en las figuras
+    "train": "Entrenamiento: Jul-Nov 2023 (fuera de muestra)",
+    "test": "Prueba: Dic 2023",
+    "validacion": "Validación: May-Jun 2024",
+}
+SET_FILES = {"train": "entrenamiento", "test": "prueba", "validacion": "validacion"}
 START = time.time()
 
 
@@ -79,17 +87,25 @@ def save_periodic_returns(results: dict, dataset: str) -> None:
             save_table(periodic_returns(r.equity, freq).to_frame("retorno"), f"retornos_{label}_{dataset}_{name}")
 
 
-def prepare_data():
-    train_raw = load_prices(DATA / "btc_project_train.csv")
-    test_raw = load_prices(DATA / "btc_project_test.csv")
-    audit = pd.DataFrame({"train": audit_prices(train_raw), "test": audit_prices(test_raw)}).astype(str)
-    save_table(audit, "auditoria_datos")
-    train = clean_prices(train_raw)
-    test = drop_overlap(train, clean_prices(test_raw))
-    for d in (train, test):
+def prepare_data() -> dict:
+    """Audita los dos archivos crudos y recorta los tres periodos de trabajo (train, test y validación),
+    que deben ser continuos, estar ordenados y no traslaparse."""
+    raw = {"train": load_prices(DATA / "btc_project_train.csv"), "test": load_prices(DATA / "btc_project_test.csv")}
+    save_table(pd.DataFrame({name: audit_prices(df) for name, df in raw.items()}).astype(str), "auditoria_datos")
+    clean = {name: clean_prices(df) for name, df in raw.items()}
+    periods = {name: select_period(clean[source], start, end) for name, (source, start, end) in PERIODS.items()}
+    for name, d in periods.items():
         validate_prices(d)
-    check_no_overlap(train, test)
-    return train, test
+        check_continuous(d, name)
+    for before, after in itertools.pairwise(periods.values()):
+        check_no_overlap(before, after)
+    summary_rows = {
+        name: {"archivo": PERIODS[name][0], "primera_barra": d.index[0], "ultima_barra": d.index[-1],
+               "barras": len(d), "dias_con_datos": round(len(d) / 288, 1)}
+        for name, d in periods.items()
+    }
+    save_table(pd.DataFrame(summary_rows).T, "periodos")
+    return periods
 
 
 def indicator_selection(train: pd.DataFrame) -> None:
@@ -149,9 +165,9 @@ def regime_differentiation(trades: pd.DataFrame, dataset: str = "train") -> dict
     return compare_groups(a, b) if min(len(a), len(b)) > 1 else {}
 
 
-def freeze_and_evaluate(train, test, feats, seg, n_trials, quick):
-    """Optimiza theta una sola vez sobre train y lo evalúa en test. La evaluación usa el theta
-    congelado y commiteado (docs/theta_frozen.json); main.py solo recalcula para verificarlo."""
+def freeze_and_evaluate(train, test, validation, feats, seg, n_trials, quick):
+    """Optimiza theta una sola vez sobre train y lo evalúa en test y en validación. La evaluación usa
+    el theta congelado y commiteado (docs/theta_frozen.json); main.py solo recalcula para verificarlo."""
     log("Recalculando theta sobre todo el train")
     recomputed = freeze_theta(train, feats, seg, n_trials=n_trials)
     to_json(recomputed, DOCS / "theta_recomputed.json")
@@ -162,25 +178,32 @@ def freeze_and_evaluate(train, test, feats, seg, n_trials, quick):
         log("theta recalculado " + ("IGUAL" if same else "DISTINTO") + " al congelado (docs/theta_frozen.json)")
     else:
         theta = jsonable(recomputed)
-    log("Evaluando en test con theta congelado")
-    results = evaluate_frozen(train, test, theta)
-    save_table(metrics_table(results), "metricas_test")
-    exposure = {k: market_exposure(r, test["Close"]) for k, r in results.items() if k != "comprar_y_mantener"}
-    save_table(pd.DataFrame(exposure).T, "exposicion_test")
-    save_periodic_returns(results, "test")
+    log("Evaluando en test y en validación con theta congelado")
+    evaluations = {"test": (train, test), "validacion": (pd.concat([train, test]), validation)}
+    results = {}
+    for name, (history, target) in evaluations.items():
+        results[name] = evaluate_frozen(history, target, theta)
+        save_table(metrics_table(results[name]), f"metricas_{name}")
+        exposure = {k: market_exposure(r, target["Close"]) for k, r in results[name].items() if k != "comprar_y_mantener"}
+        save_table(pd.DataFrame(exposure).T, f"exposicion_{name}")
+        save_periodic_returns(results[name], name)
     return theta, results
 
 
-def robustness(train, theta):
-    """Preguntas 1, 3 y 4, con el theta único congelado sobre train."""
-    p = theta["single"]["params"]
-    if p is None:
-        log("theta único sin parámetros (gate no cumplido): se omite el análisis de robustez")
+def robustness(train, seg, feats, theta):
+    """Preguntas 1, 3 y 4 con los theta congelados de cada régimen, sobre train (dentro de muestra).
+    Se hacen con la estrategia por régimen porque el theta único no pasó el filtro de calidad."""
+    thetas = {code: theta["regimes"][name]["params"] for code, name in NAMES.items()
+              if theta["regimes"][name]["params"] is not None}
+    if not thetas:
+        log("ningún régimen tiene parámetros (gate no cumplido): se omite el análisis de robustez")
         return {}
     log("Robustez: 2 de 3 contra un indicador, sensibilidad de ±20% y curva de costos")
-    effect = confirmation_effect(train, p)
-    sens = sensitivity(train, p)
-    curve = cost_curve(train, p)
+    rules = RuleRegimes(theta["rules"]["vol_crisis"], theta["rules"]["r2_trend"])
+    labels = hold_labels(rules.classify(feats), seg)
+    effect = confirmation_effect(train, seg, labels, thetas)
+    sens = sensitivity(train, seg, labels, thetas)
+    curve = cost_curve(train, seg, labels, thetas)
     equilibrio = breakeven_fee(curve)
     save_table(effect, "pregunta1_dos_de_tres")
     save_table(sens, "pregunta3_sensibilidad")
@@ -190,35 +213,39 @@ def robustness(train, theta):
     return {"comision_equilibrio_bps_por_lado": equilibrio}
 
 
-def regime_analysis(train, test, theta):
-    """Estabilidad del régimen (train contra test, umbrales congelados) y etiquetas para las figuras."""
-    full = pd.concat([train, test])
+def regime_analysis(periods, theta):
+    """Estabilidad del régimen en cada conjunto (umbrales congelados) y etiquetas para las figuras."""
+    full = pd.concat(list(periods.values()))
     seg = segment_ids(full)
     feats = regime_features(full, seg)
     rules = RuleRegimes(theta["rules"]["vol_crisis"], theta["rules"]["r2_trend"])
     labels = hold_labels(rules.classify(feats), seg)
-    n = len(train)
-    for name, part in (("train", slice(0, n)), ("test", slice(n, None))):
-        table, extra = regime_report(feats.iloc[part], labels.iloc[part], seg.iloc[part])
+    start = 0
+    for name, part in periods.items():
+        rows = slice(start, start + len(part))
+        start += len(part)
+        table, extra = regime_report(feats.iloc[rows], labels.iloc[rows], seg.iloc[rows])
         save_table(table, f"regimenes_{name}")
         save_table(pd.Series(extra, name="valor").to_frame(), f"regimenes_{name}_global")
-    return full, feats, labels
+    return feats, labels
 
 
-def make_figures(train_results, test_results, full, feats, labels):
+def make_figures(results, periods, feats, labels):
+    """`results` asigna a cada conjunto (train, test, validacion) los resultados de las tres estrategias."""
     log("Generando figuras")
     names = {"theta_unico": "θ único", "theta_por_regimen": "θ por régimen", "comprar_y_mantener": "Comprar y mantener"}
-    curves = lambda res: {names[k]: v.equity for k, v in res.items()}
-    plots.plot_equity(curves(train_results), curves(test_results), FIGURES / "fig1_valor_portafolio.png")
-    plots.plot_drawdown(curves(train_results), curves(test_results), FIGURES / "fig2_drawdown.png")
-    for dataset, res in (("entrenamiento", train_results), ("prueba", test_results)):
-        plots.plot_returns_table(res["theta_por_regimen"].equity, f"θ por régimen, {dataset}",
-                                 FIGURES / f"fig3_retornos_{dataset}.png")
-    plots.plot_regime_timeline(full["Close"], labels, FIGURES / "fig6a_regimenes_precio.png")
+    curves = {SET_TITLES[k]: {names[m]: r.equity for m, r in res.items()} for k, res in results.items()}
+    plots.plot_equity(curves, FIGURES / "fig1_valor_portafolio.png")
+    plots.plot_drawdown(curves, FIGURES / "fig2_drawdown.png")
+    for k, res in results.items():
+        plots.plot_returns_table(res["theta_por_regimen"].equity, f"θ por régimen, {SET_TITLES[k]}",
+                                 FIGURES / f"fig3_retornos_{SET_FILES[k]}.png")
+    plots.plot_regime_timeline({SET_TITLES[k]: d["Close"] for k, d in periods.items()}, labels,
+                               FIGURES / "fig6a_regimenes_precio.png")
     plots.plot_feature_distributions(feats, labels, FIGURES / "fig6b_distribuciones.png")
-    for dataset, res in (("entrenamiento", train_results), ("prueba", test_results)):
-        plots.plot_equity_with_regimes(res["theta_por_regimen"].equity, labels, f"θ por régimen, {dataset}",
-                                       FIGURES / f"fig6c_portafolio_regimenes_{dataset}.png")
+    for k, res in results.items():
+        plots.plot_equity_with_regimes(res["theta_por_regimen"].equity, labels, f"θ por régimen, {SET_TITLES[k]}",
+                                       FIGURES / f"fig6c_portafolio_regimenes_{SET_FILES[k]}.png")
 
 
 def main() -> None:
@@ -234,7 +261,8 @@ def main() -> None:
     n_trials = QUICK_TRIALS if quick else N_TRIALS
 
     log("Cargando, limpiando y auditando datos")
-    train, test = prepare_data()
+    periods = prepare_data()
+    train, test, validation = periods["train"], periods["test"], periods["validacion"]
     seg = segment_ids(train)
     feats = regime_features(train, seg)
     indicator_selection(train)
@@ -247,8 +275,9 @@ def main() -> None:
         "calmar_fuera_de_muestra": float(summary(train_results["theta_unico"])["calmar"]),
         "diferenciacion_reversion_vs_tendencia": regime_differentiation(train_results["theta_por_regimen"].trades),
     }
-    theta, test_results = freeze_and_evaluate(train, test, feats, seg, n_trials, quick)
-    regime_differentiation(test_results["theta_por_regimen"].trades, "test")
+    theta, eval_results = freeze_and_evaluate(train, test, validation, feats, seg, n_trials, quick)
+    for name, res in eval_results.items():
+        regime_differentiation(res["theta_por_regimen"].trades, name)
     regimes_fitted = table_regimes[["is_reversion", "is_tendencia", "is_crisis"]].notna().sum().sum()
     frozen_fits = 1 + sum(r["calmar"] is not None for r in theta["regimes"].values())
     summary_numbers.update(
@@ -258,9 +287,9 @@ def main() -> None:
             "configuraciones_theta_congelado": n_trials * frozen_fits,
         }
     )
-    summary_numbers.update(robustness(train, theta))
-    full, full_feats, labels = regime_analysis(train, test, theta)
-    make_figures(train_results, test_results, full, full_feats, labels)
+    summary_numbers.update(robustness(train, seg, feats, theta))
+    full_feats, labels = regime_analysis(periods, theta)
+    make_figures({"train": train_results, **eval_results}, periods, full_feats, labels)
     summary_numbers["configuraciones_totales"] = sum(v for k, v in summary_numbers.items() if k.startswith("configuraciones_"))
     summary_numbers["tiempo_total_s"] = round(time.time() - START)
     to_json(summary_numbers, TABLES / "resumen.json")
