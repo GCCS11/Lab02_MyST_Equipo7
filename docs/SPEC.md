@@ -2,13 +2,13 @@
 
 ## 1. Universo y frecuencia
 - Activo: BTCUSDT, barras de 5 minutos, UTC. Datos crudos congelados en `data/`.
-- Train: 2022-06-01 a 2023-12-31. Test: 2023-12-31 a 2024-06-03.
-- Limpieza (`src/data.py`): se descartan barras con OHLC vacío (3,745 en train, 17 en test) y barras fuera de la rejilla de 5 min (573 y 3, todas planas y sin volumen). No se rellena nada. Se quita del test la barra compartida con el train. Train queda en 162,132 barras y test en 9,366.
-- Tramos continuos: un hueco mayor a 6 h abre un tramo nuevo. Train tiene 4 tramos y test 2 (un día de diciembre y 31.5 días de mayo-junio, con un salto de 122 días entre ellos). Los indicadores se calculan dentro de cada tramo y ninguna posición cruza un corte.
-- Validación: no hay conjunto aparte. Las semanas de prueba del walk-forward dentro de train hacen de validación, y el test se usa una sola vez al final con los parámetros congelados. El test se evalúa una sola vez con parámetros fijos (docs/theta_frozen.json); no se repite el walk-forward porque el tramo de prueba de 31 días no alcanza para una ventana de 37 días.
+- Periodos (acordados con el profesor porque los archivos de Canvas tienen huecos; estos tres no los tienen): train 2023-07-01 a 2023-11-30 y test 2023-12-01 a 2023-12-31 (archivo train), validación 2024-05-02 a 2024-06-03 (archivo test). Cada uno es un solo tramo continuo (`main.py` falla si hay un corte mayor a 6 horas).
+- Limpieza (`src/data.py`): se descartan barras con OHLC vacío (3,745 en el archivo train y 17 en el test) y barras fuera de la rejilla de 5 min (573 y 3, todas planas y sin volumen). No se rellena nada. Dentro de los periodos faltan entre 0.2% y 2.0% de las barras, en huecos cortos (el mayor, de 2 h 40 min). Train queda en 43,171 barras, test en 8,572 y validación en 9,079.
+- Tramos continuos: un hueco mayor a 6 h abre un tramo nuevo. Con estos periodos solo hay uno por conjunto. Test y validación no son contiguos (hay 4 meses entre ellos), así que la validación se evalúa con indicadores y régimen que arrancan de nuevo.
+- Validación: el walk-forward semanal dentro de train (17 ventanas) hace de validación interna. Test y validación se evalúan una sola vez cada uno, con parámetros fijos (docs/theta_frozen.json); no se repite el walk-forward porque ninguno de los dos tiene 37 días.
 
 ## 2. Features
-Tres indicadores de tres familias. Selección: matriz de correlación de las señales con parámetros por defecto en train (sin mirar retornos); este trío tiene la menor correlación media entre pares (0.36).
+Tres indicadores de tres familias. Selección: matriz de correlación de las señales con parámetros por defecto en train (sin mirar retornos); este trío tiene la menor correlación media entre pares (0.33 con el train de Jul-Nov 2023; 0.36 con el de la versión anterior).
 
 | Indicador | Familia | Señal x_j en {-1, 0, +1} | Parámetros |
 |---|---|---|---|
@@ -80,5 +80,5 @@ Umbral que la estrategia debe superar: p* depende de (m, r, ATR) y tiende a 1/(1
 
 Restricción: mínimo de operaciones por ventana. Función objetivo: Calmar.
 
-## 10. Configuraciones exploradas en train antes de optimizar
+## 10. Configuraciones exploradas antes de optimizar (en el train de la versión anterior)
 7 en total: m=5 con signal_exit_after en {0, 48, 288, sin salida por señal} y m en {10, 20, 40} sin salida por señal. Observación: con parámetros por defecto la estrategia pierde en train por el peso de los costos (más de 6,000 operaciones con m=5). Esto cuenta como selección sobre train y se declara en el reporte.
