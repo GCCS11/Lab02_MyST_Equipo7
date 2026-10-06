@@ -1,7 +1,7 @@
 reason,operaciones
-signal,131
-regime_change,101
-stop_loss,88
-segment_end,56
-take_profit,45
-max_hold,9
+signal,36
+regime_change,35
+segment_end,13
+stop_loss,11
+take_profit,4
+max_hold,2
